@@ -29,10 +29,7 @@ defaults = {
     "device_flow": None,
     "msal_app": None,
     "channels_list": None,
-    "message_results": [],
-    "file_results": [],
-    "analysis_result": "",
-    "last_keyword": "",
+    "ai_answer": "",
 }
 for key, val in defaults.items():
     if key not in st.session_state:
@@ -71,6 +68,12 @@ def graph_get(url, token):
         return res.json()
     return None
 
+# --- HTMLタグを除去 ---
+def strip_html(text):
+    if not text:
+        return ""
+    return re.sub(r'<[^>]+>', '', text).strip()
+
 # --- ファイルのコンテンツをダウンロード ---
 def download_file_content(drive_id, item_id, token):
     url = f"https://graph.microsoft.com/v1.0/drives/{drive_id}/items/{item_id}/content"
@@ -80,13 +83,7 @@ def download_file_content(drive_id, item_id, token):
         return res.content
     return None
 
-# --- HTMLタグを除去 ---
-def strip_html(text):
-    if not text:
-        return ""
-    return re.sub(r'<[^>]+>', '', text).strip()
-
-# --- ファイルテキスト抽出（バイトデータから） ---
+# --- ファイルテキスト抽出 ---
 def extract_text_from_bytes(file_bytes_raw, file_name):
     file_bytes = io.BytesIO(file_bytes_raw)
     text = ""
@@ -105,7 +102,7 @@ def extract_text_from_bytes(file_bytes_raw, file_name):
         elif file_name.endswith('.txt'):
             text = file_bytes_raw.decode('utf-8', errors='ignore')
     except Exception as e:
-        st.warning(f"解析エラー({file_name}): {e}")
+        pass
     return text[:4000]
 
 # --- Teamsチャンネル＆チャット一覧取得 ---
@@ -141,127 +138,130 @@ def get_teams_and_channels(token):
             })
     return items
 
-# --- チャンネルのメッセージ検索 ---
-def search_channel_messages(team_id, channel_id, keyword, token):
-    results = []
+# --- チャンネルのメッセージ全取得 ---
+def get_channel_messages(team_id, channel_id, token, progress_cb=None):
+    all_data = []
     url = f"https://graph.microsoft.com/v1.0/teams/{team_id}/channels/{channel_id}/messages?$top=50"
     data = graph_get(url, token)
     if not data:
-        return results
+        return all_data
     for msg in data.get('value', []):
         body = strip_html(msg.get('body', {}).get('content', ''))
-        if keyword.lower() in body.lower():
-            sender = msg.get('from', {})
-            user = sender.get('user', {}) if sender else {}
-            name = user.get('displayName', '不明') if user else '不明'
-            created = msg.get('createdDateTime', '')
-            try:
-                dt = datetime.fromisoformat(created.replace('Z', '+00:00'))
-                date_str = dt.strftime('%Y/%m/%d %H:%M')
-            except Exception:
-                date_str = created
-            results.append({
-                'type': 'message',
-                'sender': name,
-                'date': date_str,
-                'body': body[:500],
-            })
-        # 返信も検索
+        if not body:
+            continue
+        sender = msg.get('from', {})
+        user = sender.get('user', {}) if sender else {}
+        name = user.get('displayName', '不明') if user else '不明'
+        created = msg.get('createdDateTime', '')
+        try:
+            dt = datetime.fromisoformat(created.replace('Z', '+00:00'))
+            date_str = dt.strftime('%Y/%m/%d %H:%M')
+        except Exception:
+            date_str = created
+        all_data.append(f"[メッセージ] {name}（{date_str}）: {body[:300]}")
+
+        # 返信も取得
         msg_id = msg.get('id')
-        reply_url = f"https://graph.microsoft.com/v1.0/teams/{team_id}/channels/{channel_id}/messages/{msg_id}/replies?$top=50"
+        reply_url = f"https://graph.microsoft.com/v1.0/teams/{team_id}/channels/{channel_id}/messages/{msg_id}/replies?$top=20"
         reply_data = graph_get(reply_url, token)
         if reply_data:
             for reply in reply_data.get('value', []):
-                body = strip_html(reply.get('body', {}).get('content', ''))
-                if keyword.lower() in body.lower():
-                    sender = reply.get('from', {})
-                    user = sender.get('user', {}) if sender else {}
-                    name = user.get('displayName', '不明') if user else '不明'
-                    created = reply.get('createdDateTime', '')
-                    try:
-                        dt = datetime.fromisoformat(created.replace('Z', '+00:00'))
-                        date_str = dt.strftime('%Y/%m/%d %H:%M')
-                    except Exception:
-                        date_str = created
-                    results.append({
-                        'type': 'message',
-                        'sender': name,
-                        'date': date_str,
-                        'body': body[:500],
-                    })
-    return results
+                rbody = strip_html(reply.get('body', {}).get('content', ''))
+                if not rbody:
+                    continue
+                rsender = reply.get('from', {})
+                ruser = rsender.get('user', {}) if rsender else {}
+                rname = ruser.get('displayName', '不明') if ruser else '不明'
+                rcreated = reply.get('createdDateTime', '')
+                try:
+                    rdt = datetime.fromisoformat(rcreated.replace('Z', '+00:00'))
+                    rdate_str = rdt.strftime('%Y/%m/%d %H:%M')
+                except Exception:
+                    rdate_str = rcreated
+                all_data.append(f"[返信] {rname}（{rdate_str}）: {rbody[:300]}")
+    return all_data
 
-# --- チャットのメッセージ検索 ---
-def search_chat_messages(chat_id, keyword, token):
-    results = []
+# --- チャットのメッセージ全取得 ---
+def get_chat_messages(chat_id, token):
+    all_data = []
     url = f"https://graph.microsoft.com/v1.0/me/chats/{chat_id}/messages?$top=50"
     data = graph_get(url, token)
     if not data:
-        return results
+        return all_data
     for msg in data.get('value', []):
         body = strip_html(msg.get('body', {}).get('content', ''))
-        if keyword.lower() in body.lower():
-            sender = msg.get('from', {})
-            user = sender.get('user', {}) if sender else {}
-            name = user.get('displayName', '不明') if user else '不明'
-            created = msg.get('createdDateTime', '')
-            try:
-                dt = datetime.fromisoformat(created.replace('Z', '+00:00'))
-                date_str = dt.strftime('%Y/%m/%d %H:%M')
-            except Exception:
-                date_str = created
-            results.append({
-                'type': 'message',
-                'sender': name,
-                'date': date_str,
-                'body': body[:500],
-            })
-    return results
+        if not body:
+            continue
+        sender = msg.get('from', {})
+        user = sender.get('user', {}) if sender else {}
+        name = user.get('displayName', '不明') if user else '不明'
+        created = msg.get('createdDateTime', '')
+        try:
+            dt = datetime.fromisoformat(created.replace('Z', '+00:00'))
+            date_str = dt.strftime('%Y/%m/%d %H:%M')
+        except Exception:
+            date_str = created
+        all_data.append(f"[メッセージ] {name}（{date_str}）: {body[:300]}")
+    return all_data
 
-# --- チャンネルのファイル検索 ---
-def search_channel_files(team_id, channel_id, keyword, token):
-    results = []
+# --- チャンネルのファイル全取得 ---
+def get_channel_files(team_id, channel_id, token):
+    all_data = []
     url = f"https://graph.microsoft.com/v1.0/teams/{team_id}/channels/{channel_id}/filesFolder"
     data = graph_get(url, token)
     if not data:
-        return results
+        return all_data
     drive_id = data.get('parentReference', {}).get('driveId')
     item_id = data.get('id')
     if not drive_id or not item_id:
-        return results
-    search_url = f"https://graph.microsoft.com/v1.0/drives/{drive_id}/items/{item_id}/search(q='{keyword}')"
-    search_data = graph_get(search_url, token)
-    if search_data:
-        for item in search_data.get('value', []):
-            if 'file' in item:
-                file_drive_id = item.get('parentReference', {}).get('driveId', drive_id)
-                results.append({
-                    'type': 'file',
-                    'name': item['name'],
-                    'webUrl': item.get('webUrl', ''),
-                    'drive_id': file_drive_id,
-                    'item_id': item['id'],
-                })
-    return results
+        return all_data
+
+    # フォルダ内のファイル一覧
+    children_url = f"https://graph.microsoft.com/v1.0/drives/{drive_id}/items/{item_id}/children?$top=30"
+    children_data = graph_get(children_url, token)
+    if not children_data:
+        return all_data
+
+    for item in children_data.get('value', []):
+        if 'file' not in item:
+            continue
+        name = item['name']
+        web_url = item.get('webUrl', '')
+        file_item_id = item['id']
+        file_drive_id = item.get('parentReference', {}).get('driveId', drive_id)
+
+        # 対応ファイル形式のみ
+        if not name.endswith(('.xlsx', '.xlsm', '.docx', '.txt')):
+            all_data.append(f"[ファイル] {name}（{web_url}）: ※未対応形式のためスキップ")
+            continue
+
+        content = download_file_content(file_drive_id, file_item_id, token)
+        if content:
+            text = extract_text_from_bytes(content, name)
+            if text:
+                all_data.append(f"[ファイル] {name}（{web_url}）:\n{text[:2000]}")
+    return all_data
 
 # ======================
 # UI
 # ======================
-st.title("📂 Teams 横断検索アプリ")
-st.caption("チャンネル・チャットのメッセージとファイルをキーワードで検索し、AIで要約します")
+st.title("🔍 Teams AI検索アシスタント")
+st.caption("選んだチャンネルのメッセージとファイルを元に、AIが質問に答えます")
 
 # --- Microsoft認証 ---
-st.header("① Microsoft 365 にログイン")
 app = get_msal_app()
 
 if st.session_state.ms_token:
-    st.success("✅ ログイン済みです")
-    if st.button("ログアウト"):
-        for key in defaults:
-            st.session_state[key] = defaults[key]
-        st.rerun()
+    st.success("✅ Microsoft 365 ログイン済み")
+    col1, col2 = st.columns([6, 1])
+    with col2:
+        if st.button("ログアウト"):
+            for key in defaults:
+                st.session_state[key] = defaults[key]
+            st.rerun()
 
 if not st.session_state.ms_token:
+    st.header("① Microsoft 365 にログイン")
     if st.session_state.device_flow is None:
         if st.button("Microsoft 365 でログイン"):
             flow = app.initiate_device_flow(scopes=SCOPES)
@@ -299,118 +299,80 @@ if st.session_state.ms_token:
     if not channels:
         st.warning("Teams・チャットが見つかりませんでした。")
     else:
-        st.header("② 検索先を選ぶ")
+        # --- 検索先選択（複数選択） ---
         labels = [ch['label'] for ch in channels]
-        selected_index = st.selectbox(
-            "検索したいチャンネル・チャットを選んでください",
+        selected_indices = st.multiselect(
+            "📂 検索先を選んでください（複数選択可）",
             range(len(labels)),
             format_func=lambda i: labels[i],
         )
-        selected = channels[selected_index]
 
-        st.header("③ キーワードで検索")
-        keyword = st.text_input("検索キーワードを入力してください")
+        # --- 質問入力 ---
+        question = st.text_input(
+            "💬 質問を入力してください",
+            placeholder="例：Aさんが体調不良だったのはいつ？"
+        )
 
-        if st.button("🔍 メッセージ＆ファイルを検索"):
-            if not keyword:
-                st.warning("キーワードを入力してください。")
+        if st.button("🚀 AIに聞く"):
+            if not selected_indices:
+                st.warning("検索先を1つ以上選んでください。")
+            elif not question:
+                st.warning("質問を入力してください。")
             else:
-                st.session_state.last_keyword = keyword
-                st.session_state.analysis_result = ""
+                st.session_state.ai_answer = ""
+                all_context = []
 
-                with st.spinner("メッセージを検索中..."):
-                    if selected['type'] == 'channel':
-                        msg_results = search_channel_messages(
-                            selected['team_id'], selected['channel_id'], keyword, token
+                # 進捗表示
+                progress = st.progress(0)
+                total = len(selected_indices)
+
+                for idx, sel_i in enumerate(selected_indices):
+                    sel = channels[sel_i]
+                    st.write(f"📡 {sel['label']} のデータを取得中...")
+
+                    if sel['type'] == 'channel':
+                        msgs = get_channel_messages(
+                            sel['team_id'], sel['channel_id'], token
                         )
+                        files = get_channel_files(
+                            sel['team_id'], sel['channel_id'], token
+                        )
+                        all_context.extend(msgs)
+                        all_context.extend(files)
                     else:
-                        msg_results = search_chat_messages(
-                            selected['chat_id'], keyword, token
-                        )
+                        msgs = get_chat_messages(sel['chat_id'], token)
+                        all_context.extend(msgs)
 
-                with st.spinner("ファイルを検索中..."):
-                    if selected['type'] == 'channel':
-                        file_results = search_channel_files(
-                            selected['team_id'], selected['channel_id'], keyword, token
-                        )
-                    else:
-                        file_results = []
+                    progress.progress((idx + 1) / total)
 
-                st.session_state.message_results = msg_results
-                st.session_state.file_results = file_results
-
-        # --- メッセージ検索結果 ---
-        if st.session_state.message_results:
-            st.header("④ メッセージ検索結果")
-            st.write(f"💬 {len(st.session_state.message_results)} 件のメッセージが見つかりました")
-            for i, msg in enumerate(st.session_state.message_results):
-                with st.expander(f"📝 {msg['sender']}（{msg['date']}）"):
-                    st.write(msg['body'])
-
-        # --- ファイル検索結果 ---
-        if st.session_state.file_results:
-            st.header("⑤ ファイル検索結果")
-            st.write(f"📁 {len(st.session_state.file_results)} 件のファイルが見つかりました")
-            selected_files = []
-            for i, item in enumerate(st.session_state.file_results):
-                checked = st.checkbox(item['name'], key=f"file_{i}")
-                if item.get('webUrl'):
-                    st.markdown(f"　🔗 [{item['name']}]({item['webUrl']})")
-                if checked:
-                    selected_files.append(item)
-
-        # --- 検索結果なし ---
-        if (st.session_state.last_keyword
-                and not st.session_state.message_results
-                and not st.session_state.file_results):
-            st.info("検索結果が見つかりませんでした。")
-
-        # --- AI解析ボタン ---
-        if st.session_state.message_results or st.session_state.file_results:
-            st.header("⑥ AIで要約・分析")
-            if st.button("🤖 AIで分析する"):
-                analysis_context = ""
-                keyword = st.session_state.last_keyword
-
-                # メッセージをコンテキストに追加
-                for msg in st.session_state.message_results:
-                    analysis_context += (
-                        f"\n--- メッセージ({msg['sender']} / {msg['date']}) ---\n"
-                        f"{msg['body']}\n"
-                    )
-
-                # 選択されたファイルをダウンロードして解析
-                for item in st.session_state.file_results:
-                    drive_id = item.get('drive_id')
-                    item_id = item.get('item_id')
-                    if drive_id and item_id:
-                        with st.spinner(f"📄 {item['name']} を読み取り中..."):
-                            content = download_file_content(drive_id, item_id, token)
-                            if content:
-                                text = extract_text_from_bytes(content, item['name'])
-                                if text:
-                                    analysis_context += f"\n--- ファイル: {item['name']} ---\n{text}\n"
-
-                if not analysis_context:
-                    st.warning("分析するデータがありません。")
+                if not all_context:
+                    st.warning("データが取得できませんでした。")
                 else:
-                    with st.spinner("AIが分析中..."):
+                    # データ量を制限（Geminiの入力上限対策）
+                    context_text = "\n".join(all_context)
+                    if len(context_text) > 50000:
+                        context_text = context_text[:50000] + "\n...(以下省略)"
+
+                    with st.spinner("🤖 AIが分析中..."):
                         model = get_working_model()
                         prompt = (
-                            f"あなたは優秀なアシスタントです。以下のメッセージとファイルの内容から、"
-                            f"「{keyword}」に関連する情報を整理してください。\n"
-                            f"・誰がいつ発言したか\n"
-                            f"・具体的な数値、日付、指示、変更点\n"
-                            f"・全体の要約\n\n"
-                            f"【解析対象データ】\n{analysis_context}"
+                            f"あなたは社内アシスタントです。以下のTeamsメッセージとファイルの内容を元に、"
+                            f"ユーザーの質問に正確に答えてください。\n\n"
+                            f"【ルール】\n"
+                            f"・回答には必ず根拠（エビデンス）を付けてください\n"
+                            f"・エビデンスは「いつ・誰が・どのファイル/メッセージで」の形式で示してください\n"
+                            f"・該当する情報が複数あれば、すべて時系列で列挙してください\n"
+                            f"・見つからない場合は「該当する情報は見つかりませんでした」と回答してください\n\n"
+                            f"【ユーザーの質問】\n{question}\n\n"
+                            f"【検索対象データ】\n{context_text}"
                         )
                         try:
                             ai_res = model.generate_content(prompt)
-                            st.session_state.analysis_result = ai_res.text.strip()
+                            st.session_state.ai_answer = ai_res.text.strip()
                         except Exception as e:
                             st.error(f"AI分析エラー: {e}")
 
-        # --- 分析結果表示 ---
-        if st.session_state.analysis_result:
-            st.header("📊 AIの分析結果")
-            st.markdown(st.session_state.analysis_result)
+        # --- AI回答表示 ---
+        if st.session_state.ai_answer:
+            st.header("📊 AIの回答")
+            st.markdown(st.session_state.ai_answer)
