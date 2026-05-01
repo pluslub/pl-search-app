@@ -1,0 +1,6 @@
+streamlit
+google-generativeai
+msal
+requests
+python-docx
+openpyxl
