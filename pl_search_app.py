@@ -71,19 +71,24 @@ def graph_get(url, token):
         return res.json()
     return None
 
+# --- ファイルのコンテンツをダウンロード ---
+def download_file_content(drive_id, item_id, token):
+    url = f"https://graph.microsoft.com/v1.0/drives/{drive_id}/items/{item_id}/content"
+    headers = {'Authorization': f'Bearer {token}'}
+    res = requests.get(url, headers=headers, allow_redirects=True)
+    if res.status_code == 200:
+        return res.content
+    return None
+
 # --- HTMLタグを除去 ---
 def strip_html(text):
     if not text:
         return ""
     return re.sub(r'<[^>]+>', '', text).strip()
 
-# --- ファイルテキスト抽出 ---
-def extract_text_from_url(download_url, file_name, token):
-    headers = {'Authorization': f'Bearer {token}'}
-    res = requests.get(download_url, headers=headers)
-    if res.status_code != 200:
-        return ""
-    file_bytes = io.BytesIO(res.content)
+# --- ファイルテキスト抽出（バイトデータから） ---
+def extract_text_from_bytes(file_bytes_raw, file_name):
+    file_bytes = io.BytesIO(file_bytes_raw)
     text = ""
     try:
         if file_name.endswith(('.xlsx', '.xlsm')):
@@ -98,7 +103,7 @@ def extract_text_from_url(download_url, file_name, token):
             doc = Document(file_bytes)
             text = "\n".join([p.text for p in doc.paragraphs])
         elif file_name.endswith('.txt'):
-            text = res.content.decode('utf-8', errors='ignore')
+            text = file_bytes_raw.decode('utf-8', errors='ignore')
     except Exception as e:
         st.warning(f"解析エラー({file_name}): {e}")
     return text[:4000]
@@ -161,8 +166,7 @@ def search_channel_messages(team_id, channel_id, keyword, token):
                 'date': date_str,
                 'body': body[:500],
             })
-    # 返信も検索
-    for msg in data.get('value', []):
+        # 返信も検索
         msg_id = msg.get('id')
         reply_url = f"https://graph.microsoft.com/v1.0/teams/{team_id}/channels/{channel_id}/messages/{msg_id}/replies?$top=50"
         reply_data = graph_get(reply_url, token)
@@ -212,16 +216,6 @@ def search_chat_messages(chat_id, keyword, token):
                 'date': date_str,
                 'body': body[:500],
             })
-        # 添付ファイルも収集
-        for att in msg.get('attachments', []):
-            att_name = att.get('name', '')
-            if att_name:
-                results.append({
-                    'type': 'file',
-                    'name': att_name,
-                    'webUrl': att.get('contentUrl', ''),
-                    'downloadUrl': '',
-                })
     return results
 
 # --- チャンネルのファイル検索 ---
@@ -240,11 +234,13 @@ def search_channel_files(team_id, channel_id, keyword, token):
     if search_data:
         for item in search_data.get('value', []):
             if 'file' in item:
+                file_drive_id = item.get('parentReference', {}).get('driveId', drive_id)
                 results.append({
                     'type': 'file',
                     'name': item['name'],
                     'webUrl': item.get('webUrl', ''),
-                    'downloadUrl': item.get('@microsoft.graph.downloadUrl', ''),
+                    'drive_id': file_drive_id,
+                    'item_id': item['id'],
                 })
     return results
 
@@ -324,14 +320,13 @@ if st.session_state.ms_token:
 
                 with st.spinner("メッセージを検索中..."):
                     if selected['type'] == 'channel':
-                        msgs = search_channel_messages(
+                        msg_results = search_channel_messages(
                             selected['team_id'], selected['channel_id'], keyword, token
                         )
                     else:
-                        msgs = search_chat_messages(selected['chat_id'], keyword, token)
-
-                msg_results = [m for m in msgs if m['type'] == 'message']
-                file_from_chat = [m for m in msgs if m['type'] == 'file']
+                        msg_results = search_chat_messages(
+                            selected['chat_id'], keyword, token
+                        )
 
                 with st.spinner("ファイルを検索中..."):
                     if selected['type'] == 'channel':
@@ -339,7 +334,7 @@ if st.session_state.ms_token:
                             selected['team_id'], selected['channel_id'], keyword, token
                         )
                     else:
-                        file_results = file_from_chat
+                        file_results = []
 
                 st.session_state.message_results = msg_results
                 st.session_state.file_results = file_results
@@ -360,7 +355,7 @@ if st.session_state.ms_token:
             for i, item in enumerate(st.session_state.file_results):
                 checked = st.checkbox(item['name'], key=f"file_{i}")
                 if item.get('webUrl'):
-                    st.markdown(f"　🔗 [{item['webUrl']}]({item['webUrl']})")
+                    st.markdown(f"　🔗 [{item['name']}]({item['webUrl']})")
                 if checked:
                     selected_files.append(item)
 
@@ -384,14 +379,17 @@ if st.session_state.ms_token:
                         f"{msg['body']}\n"
                     )
 
-                # 選択されたファイルをコンテキストに追加
+                # 選択されたファイルをダウンロードして解析
                 for item in st.session_state.file_results:
-                    if item.get('downloadUrl'):
-                        text = extract_text_from_url(
-                            item['downloadUrl'], item['name'], token
-                        )
-                        if text:
-                            analysis_context += f"\n--- ファイル: {item['name']} ---\n{text}\n"
+                    drive_id = item.get('drive_id')
+                    item_id = item.get('item_id')
+                    if drive_id and item_id:
+                        with st.spinner(f"📄 {item['name']} を読み取り中..."):
+                            content = download_file_content(drive_id, item_id, token)
+                            if content:
+                                text = extract_text_from_bytes(content, item['name'])
+                                if text:
+                                    analysis_context += f"\n--- ファイル: {item['name']} ---\n{text}\n"
 
                 if not analysis_context:
                     st.warning("分析するデータがありません。")
