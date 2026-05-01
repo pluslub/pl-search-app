@@ -21,6 +21,7 @@ SCOPES = [
     "Team.ReadBasic.All",
     "Channel.ReadBasic.All",
     "ChannelMessage.Read.All",
+    "Notes.Read.All",
 ]
 
 # --- セッション状態の初期化 ---
@@ -30,6 +31,7 @@ defaults = {
     "msal_app": None,
     "channels_list": None,
     "ai_answer": "",
+    "debug_info": "",
 }
 for key, val in defaults.items():
     if key not in st.session_state:
@@ -102,7 +104,7 @@ def extract_text_from_bytes(file_bytes_raw, file_name):
         elif file_name.endswith('.txt'):
             text = file_bytes_raw.decode('utf-8', errors='ignore')
     except Exception as e:
-        pass
+        text = f"(解析エラー: {e})"
     return text[:4000]
 
 # --- Teamsチャンネル＆チャット一覧取得 ---
@@ -138,8 +140,8 @@ def get_teams_and_channels(token):
             })
     return items
 
-# --- チャンネルのメッセージ全取得 ---
-def get_channel_messages(team_id, channel_id, token, progress_cb=None):
+# --- チャンネルのメッセージ取得 ---
+def get_channel_messages(team_id, channel_id, token):
     all_data = []
     url = f"https://graph.microsoft.com/v1.0/teams/{team_id}/channels/{channel_id}/messages?$top=50"
     data = graph_get(url, token)
@@ -159,8 +161,7 @@ def get_channel_messages(team_id, channel_id, token, progress_cb=None):
         except Exception:
             date_str = created
         all_data.append(f"[メッセージ] {name}（{date_str}）: {body[:300]}")
-
-        # 返信も取得
+        # 返信
         msg_id = msg.get('id')
         reply_url = f"https://graph.microsoft.com/v1.0/teams/{team_id}/channels/{channel_id}/messages/{msg_id}/replies?$top=20"
         reply_data = graph_get(reply_url, token)
@@ -181,7 +182,7 @@ def get_channel_messages(team_id, channel_id, token, progress_cb=None):
                 all_data.append(f"[返信] {rname}（{rdate_str}）: {rbody[:300]}")
     return all_data
 
-# --- チャットのメッセージ全取得 ---
+# --- チャットのメッセージ取得 ---
 def get_chat_messages(chat_id, token):
     all_data = []
     url = f"https://graph.microsoft.com/v1.0/me/chats/{chat_id}/messages?$top=50"
@@ -204,7 +205,7 @@ def get_chat_messages(chat_id, token):
         all_data.append(f"[メッセージ] {name}（{date_str}）: {body[:300]}")
     return all_data
 
-# --- チャンネルのファイル全取得 ---
+# --- チャンネルのファイル取得 ---
 def get_channel_files(team_id, channel_id, token):
     all_data = []
     url = f"https://graph.microsoft.com/v1.0/teams/{team_id}/channels/{channel_id}/filesFolder"
@@ -215,13 +216,10 @@ def get_channel_files(team_id, channel_id, token):
     item_id = data.get('id')
     if not drive_id or not item_id:
         return all_data
-
-    # フォルダ内のファイル一覧
     children_url = f"https://graph.microsoft.com/v1.0/drives/{drive_id}/items/{item_id}/children?$top=30"
     children_data = graph_get(children_url, token)
     if not children_data:
         return all_data
-
     for item in children_data.get('value', []):
         if 'file' not in item:
             continue
@@ -229,30 +227,74 @@ def get_channel_files(team_id, channel_id, token):
         web_url = item.get('webUrl', '')
         file_item_id = item['id']
         file_drive_id = item.get('parentReference', {}).get('driveId', drive_id)
-
-        # 対応ファイル形式のみ
         if not name.endswith(('.xlsx', '.xlsm', '.docx', '.txt')):
-            all_data.append(f"[ファイル] {name}（{web_url}）: ※未対応形式のためスキップ")
             continue
-
         content = download_file_content(file_drive_id, file_item_id, token)
         if content:
             text = extract_text_from_bytes(content, name)
             if text:
-                all_data.append(f"[ファイル] {name}（{web_url}）:\n{text[:2000]}")
+                all_data.append(f"[ファイル: {name}]（{web_url}）:\n{text[:2000]}")
+    return all_data
+
+# --- OneNoteページ取得（チャンネルに紐づくノートブック） ---
+def get_channel_onenote(team_id, channel_id, token):
+    all_data = []
+    # チャンネルのタブ一覧からOneNoteタブを探す
+    tabs_url = f"https://graph.microsoft.com/v1.0/teams/{team_id}/channels/{channel_id}/tabs?$expand=teamsApp"
+    tabs_data = graph_get(tabs_url, token)
+    if not tabs_data:
+        return all_data
+
+    for tab in tabs_data.get('value', []):
+        app_id = tab.get('teamsApp', {}).get('id', '')
+        # OneNoteのアプリID
+        if '0d820ecd' in app_id or 'onenote' in tab.get('displayName', '').lower():
+            # タブの設定からノートブックIDを取得
+            config = tab.get('configuration', {})
+            notebook_id = config.get('notebookId', '')
+            if not notebook_id:
+                # グループのOneNoteからページを取得
+                break
+
+    # グループ（チーム）のOneNoteページを全取得
+    group_id = team_id
+    pages_url = f"https://graph.microsoft.com/v1.0/groups/{group_id}/onenote/pages?$top=30&$select=id,title,createdDateTime"
+    pages_data = graph_get(pages_url, token)
+    if not pages_data:
+        return all_data
+
+    for page in pages_data.get('value', []):
+        page_id = page.get('id', '')
+        title = page.get('title', '無題')
+        created = page.get('createdDateTime', '')
+        try:
+            dt = datetime.fromisoformat(created.replace('Z', '+00:00'))
+            date_str = dt.strftime('%Y/%m/%d')
+        except Exception:
+            date_str = created
+
+        # ページの本文を取得
+        content_url = f"https://graph.microsoft.com/v1.0/groups/{group_id}/onenote/pages/{page_id}/content"
+        headers = {'Authorization': f'Bearer {token}'}
+        res = requests.get(content_url, headers=headers)
+        if res.status_code == 200:
+            body = strip_html(res.text)
+            if body.strip():
+                all_data.append(f"[OneNote: {title}]（{date_str}）:\n{body[:3000]}")
+
     return all_data
 
 # ======================
 # UI
 # ======================
 st.title("🔍 Teams AI検索アシスタント")
-st.caption("選んだチャンネルのメッセージとファイルを元に、AIが質問に答えます")
+st.caption("メッセージ・ファイル・OneNoteを横断検索し、AIがエビデンス付きで回答します")
 
 # --- Microsoft認証 ---
 app = get_msal_app()
 
 if st.session_state.ms_token:
-    st.success("✅ Microsoft 365 ログイン済み")
+    st.success("✅ ログイン済み")
     col1, col2 = st.columns([6, 1])
     with col2:
         if st.button("ログアウト"):
@@ -261,7 +303,6 @@ if st.session_state.ms_token:
             st.rerun()
 
 if not st.session_state.ms_token:
-    st.header("① Microsoft 365 にログイン")
     if st.session_state.device_flow is None:
         if st.button("Microsoft 365 でログイン"):
             flow = app.initiate_device_flow(scopes=SCOPES)
@@ -282,14 +323,13 @@ if not st.session_state.ms_token:
                     st.session_state.device_flow = None
                     st.rerun()
                 else:
-                    st.error("❌ 認証に失敗しました。もう一度お試しください。")
+                    st.error("❌ 認証に失敗しました。")
                     st.session_state.device_flow = None
 
 # --- メイン機能 ---
 if st.session_state.ms_token:
     token = st.session_state.ms_token
 
-    # チャンネル一覧をキャッシュ
     if st.session_state.channels_list is None:
         with st.spinner("Teams・チャット一覧を取得中..."):
             st.session_state.channels_list = get_teams_and_channels(token)
@@ -299,7 +339,6 @@ if st.session_state.ms_token:
     if not channels:
         st.warning("Teams・チャットが見つかりませんでした。")
     else:
-        # --- 検索先選択（複数選択） ---
         labels = [ch['label'] for ch in channels]
         selected_indices = st.multiselect(
             "📂 検索先を選んでください（複数選択可）",
@@ -307,10 +346,9 @@ if st.session_state.ms_token:
             format_func=lambda i: labels[i],
         )
 
-        # --- 質問入力 ---
         question = st.text_input(
             "💬 質問を入力してください",
-            placeholder="例：Aさんが体調不良だったのはいつ？"
+            placeholder="例：角谷さんが興味ありそうな求人は？"
         )
 
         if st.button("🚀 AIに聞く"):
@@ -320,9 +358,10 @@ if st.session_state.ms_token:
                 st.warning("質問を入力してください。")
             else:
                 st.session_state.ai_answer = ""
+                st.session_state.debug_info = ""
                 all_context = []
+                debug_lines = []
 
-                # 進捗表示
                 progress = st.progress(0)
                 total = len(selected_indices)
 
@@ -331,32 +370,44 @@ if st.session_state.ms_token:
                     st.write(f"📡 {sel['label']} のデータを取得中...")
 
                     if sel['type'] == 'channel':
-                        msgs = get_channel_messages(
-                            sel['team_id'], sel['channel_id'], token
-                        )
-                        files = get_channel_files(
-                            sel['team_id'], sel['channel_id'], token
-                        )
+                        # メッセージ
+                        msgs = get_channel_messages(sel['team_id'], sel['channel_id'], token)
+                        debug_lines.append(f"{sel['label']}: メッセージ {len(msgs)} 件")
                         all_context.extend(msgs)
+
+                        # ファイル
+                        files = get_channel_files(sel['team_id'], sel['channel_id'], token)
+                        debug_lines.append(f"{sel['label']}: ファイル {len(files)} 件")
                         all_context.extend(files)
+
+                        # OneNote
+                        notes = get_channel_onenote(sel['team_id'], sel['channel_id'], token)
+                        debug_lines.append(f"{sel['label']}: OneNote {len(notes)} 件")
+                        all_context.extend(notes)
                     else:
                         msgs = get_chat_messages(sel['chat_id'], token)
+                        debug_lines.append(f"{sel['label']}: メッセージ {len(msgs)} 件")
                         all_context.extend(msgs)
 
                     progress.progress((idx + 1) / total)
 
+                st.session_state.debug_info = "\n".join(debug_lines)
+
                 if not all_context:
                     st.warning("データが取得できませんでした。")
                 else:
-                    # データ量を制限（Geminiの入力上限対策）
                     context_text = "\n".join(all_context)
-                    if len(context_text) > 50000:
+                    total_chars = len(context_text)
+                    debug_lines.append(f"合計データ量: {total_chars} 文字")
+                    st.session_state.debug_info = "\n".join(debug_lines)
+
+                    if total_chars > 50000:
                         context_text = context_text[:50000] + "\n...(以下省略)"
 
                     with st.spinner("🤖 AIが分析中..."):
                         model = get_working_model()
                         prompt = (
-                            f"あなたは社内アシスタントです。以下のTeamsメッセージとファイルの内容を元に、"
+                            f"あなたは社内アシスタントです。以下のTeamsメッセージ・ファイル・OneNoteの内容を元に、"
                             f"ユーザーの質問に正確に答えてください。\n\n"
                             f"【ルール】\n"
                             f"・回答には必ず根拠（エビデンス）を付けてください\n"
@@ -376,3 +427,8 @@ if st.session_state.ms_token:
         if st.session_state.ai_answer:
             st.header("📊 AIの回答")
             st.markdown(st.session_state.ai_answer)
+
+        # --- デバッグ情報 ---
+        if st.session_state.debug_info:
+            with st.expander("🔧 取得データの内訳（デバッグ）"):
+                st.text(st.session_state.debug_info)
