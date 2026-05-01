@@ -30,8 +30,7 @@ defaults = {
     "msal_app": None,
     "channels_list": None,
     "ai_answer": "",
-    "debug_info": "",
-    "raw_messages": [],
+    "evidence_links": [],
 }
 for key, val in defaults.items():
     if key not in st.session_state:
@@ -117,7 +116,9 @@ def get_teams_and_channels(token):
                         'label': f"📢 {team_name} / {ch['displayName']}",
                         'type': 'channel',
                         'team_id': team_id,
+                        'team_name': team_name,
                         'channel_id': ch['id'],
+                        'channel_name': ch['displayName'],
                     })
     chat_data = graph_get("https://graph.microsoft.com/v1.0/me/chats?$expand=members", token)
     if chat_data:
@@ -133,43 +134,49 @@ def get_teams_and_channels(token):
             })
     return items
 
-def get_channel_messages(team_id, channel_id, token):
+def get_channel_messages(team_id, channel_id, team_name, channel_name, token):
     all_data = []
-    raw = []
+    links = []
     url = f"https://graph.microsoft.com/v1.0/teams/{team_id}/channels/{channel_id}/messages?$top=50"
     data = graph_get(url, token)
     if not data:
-        return all_data, raw
+        return all_data, links
 
     for msg in data.get('value', []):
-        # 生のbody content
         raw_body = msg.get('body', {}).get('content', '')
         body = strip_html(raw_body)
-
         sender = msg.get('from', {})
         user = sender.get('user', {}) if sender else {}
         name = user.get('displayName', '不明') if user else '不明'
         created = msg.get('createdDateTime', '')
+        msg_id = msg.get('id', '')
         try:
             dt = datetime.fromisoformat(created.replace('Z', '+00:00'))
             date_str = dt.strftime('%Y/%m/%d %H:%M')
         except Exception:
             date_str = created
 
-        # 添付ファイル名もテキストとして追加
+        # TeamsメッセージへのディープリンクURL
+        teams_link = f"https://teams.microsoft.com/l/message/{channel_id}/{msg_id}?groupId={team_id}&tenantId={MS_TENANT_ID}"
+
         attachments = msg.get('attachments', [])
         att_names = [a.get('name', '') for a in attachments if a.get('name')]
 
-        entry = f"[メッセージ] {name}（{date_str}）: {body}"
+        entry = f"[メッセージID:{msg_id}] {name}（{date_str}）: {body}"
         if att_names:
             entry += f" [添付: {', '.join(att_names)}]"
 
         if body or att_names:
             all_data.append(entry[:500])
-            raw.append({'sender': name, 'date': date_str, 'body': body[:200], 'attachments': att_names})
+            links.append({
+                'id': msg_id,
+                'type': 'message',
+                'label': f"{name}（{date_str}）",
+                'url': teams_link,
+                'detail': body[:100] or ', '.join(att_names),
+            })
 
         # 返信
-        msg_id = msg.get('id')
         reply_url = f"https://graph.microsoft.com/v1.0/teams/{team_id}/channels/{channel_id}/messages/{msg_id}/replies?$top=20"
         reply_data = graph_get(reply_url, token)
         if reply_data:
@@ -179,6 +186,7 @@ def get_channel_messages(team_id, channel_id, token):
                 ruser = rsender.get('user', {}) if rsender else {}
                 rname = ruser.get('displayName', '不明') if ruser else '不明'
                 rcreated = reply.get('createdDateTime', '')
+                reply_id = reply.get('id', '')
                 try:
                     rdt = datetime.fromisoformat(rcreated.replace('Z', '+00:00'))
                     rdate_str = rdt.strftime('%Y/%m/%d %H:%M')
@@ -186,29 +194,37 @@ def get_channel_messages(team_id, channel_id, token):
                     rdate_str = rcreated
                 ratts = reply.get('attachments', [])
                 ratt_names = [a.get('name', '') for a in ratts if a.get('name')]
-                rentry = f"[返信] {rname}（{rdate_str}）: {rbody}"
+                rentry = f"[メッセージID:{reply_id}] {rname}（{rdate_str}）: {rbody}"
                 if ratt_names:
                     rentry += f" [添付: {', '.join(ratt_names)}]"
                 if rbody or ratt_names:
                     all_data.append(rentry[:500])
-                    raw.append({'sender': rname, 'date': rdate_str, 'body': rbody[:200], 'attachments': ratt_names})
+                    reply_link = f"https://teams.microsoft.com/l/message/{channel_id}/{reply_id}?groupId={team_id}&tenantId={MS_TENANT_ID}"
+                    links.append({
+                        'id': reply_id,
+                        'type': 'message',
+                        'label': f"{rname}（{rdate_str}）",
+                        'url': reply_link,
+                        'detail': rbody[:100] or ', '.join(ratt_names),
+                    })
 
-    return all_data, raw
+    return all_data, links
 
 def get_channel_files(team_id, channel_id, token):
     all_data = []
+    links = []
     url = f"https://graph.microsoft.com/v1.0/teams/{team_id}/channels/{channel_id}/filesFolder"
     data = graph_get(url, token)
     if not data:
-        return all_data
+        return all_data, links
     drive_id = data.get('parentReference', {}).get('driveId')
     item_id = data.get('id')
     if not drive_id or not item_id:
-        return all_data
+        return all_data, links
     children_url = f"https://graph.microsoft.com/v1.0/drives/{drive_id}/items/{item_id}/children?$top=50"
     children_data = graph_get(children_url, token)
     if not children_data:
-        return all_data
+        return all_data, links
     for item in children_data.get('value', []):
         if 'file' not in item:
             continue
@@ -216,26 +232,37 @@ def get_channel_files(team_id, channel_id, token):
         web_url = item.get('webUrl', '')
         file_item_id = item['id']
         file_drive_id = item.get('parentReference', {}).get('driveId', drive_id)
+        links.append({
+            'id': file_item_id,
+            'type': 'file',
+            'label': name,
+            'url': web_url,
+            'detail': name,
+        })
         if not name.endswith(('.xlsx', '.xlsm', '.docx', '.txt')):
-            all_data.append(f"[ファイル: {name}]（{web_url}）: ※未対応形式")
+            all_data.append(f"[ファイルID:{file_item_id}] ファイル: {name}（{web_url}）: ※未対応形式")
             continue
         content = download_file_content(file_drive_id, file_item_id, token)
         if content:
             text = extract_text_from_bytes(content, name)
             if text:
-                all_data.append(f"[ファイル: {name}]（{web_url}）:\n{text[:2000]}")
-    return all_data
+                all_data.append(f"[ファイルID:{file_item_id}] ファイル: {name}（{web_url}）:\n{text[:2000]}")
+    return all_data, links
 
 def get_channel_onenote(team_id, token):
     all_data = []
-    pages_url = f"https://graph.microsoft.com/v1.0/groups/{team_id}/onenote/pages?$top=50&$select=id,title,createdDateTime"
+    links = []
+    pages_url = f"https://graph.microsoft.com/v1.0/groups/{team_id}/onenote/pages?$top=50&$select=id,title,createdDateTime,links"
     pages_data = graph_get(pages_url, token)
     if not pages_data:
-        return all_data
+        return all_data, links
     for page in pages_data.get('value', []):
         page_id = page.get('id', '')
         title = page.get('title', '無題')
         created = page.get('createdDateTime', '')
+        # OneNoteページのリンク
+        page_links = page.get('links', {})
+        one_note_url = page_links.get('oneNoteWebUrl', {}).get('href', '')
         try:
             dt = datetime.fromisoformat(created.replace('Z', '+00:00'))
             date_str = dt.strftime('%Y/%m/%d')
@@ -247,13 +274,21 @@ def get_channel_onenote(team_id, token):
         if res.status_code == 200:
             body = strip_html(res.text)
             if body.strip():
-                all_data.append(f"[OneNote: {title}]（{date_str}）:\n{body[:3000]}")
-    return all_data
+                all_data.append(f"[OneNoteID:{page_id}] OneNote: {title}（{date_str}）:\n{body[:3000]}")
+                links.append({
+                    'id': page_id,
+                    'type': 'onenote',
+                    'label': f"OneNote: {title}（{date_str}）",
+                    'url': one_note_url,
+                    'detail': title,
+                })
+    return all_data, links
 
 # ======================
 # UI
 # ======================
 st.title("🔍 Teams AI検索アシスタント")
+st.caption("メッセージ・ファイル・OneNoteを横断検索し、AIがエビデンス付きで回答します")
 
 app = get_msal_app()
 
@@ -309,7 +344,7 @@ if st.session_state.ms_token:
 
         question = st.text_input(
             "💬 質問を入力してください",
-            placeholder="例：小島さんについて教えて"
+            placeholder="例：角谷さんが興味ありそうな求人は？"
         )
 
         if st.button("🚀 AIに聞く"):
@@ -319,9 +354,9 @@ if st.session_state.ms_token:
                 st.warning("質問を入力してください。")
             else:
                 st.session_state.ai_answer = ""
-                st.session_state.raw_messages = []
+                st.session_state.evidence_links = []
                 all_context = []
-                debug_lines = []
+                all_links = []
 
                 progress = st.progress(0)
                 total = len(selected_indices)
@@ -331,24 +366,24 @@ if st.session_state.ms_token:
                     st.write(f"📡 {sel['label']} のデータを取得中...")
 
                     if sel['type'] == 'channel':
-                        msgs, raw = get_channel_messages(sel['team_id'], sel['channel_id'], token)
-                        st.session_state.raw_messages.extend(raw)
-                        debug_lines.append(f"{sel['label']}: メッセージ {len(msgs)} 件")
+                        msgs, msg_links = get_channel_messages(
+                            sel['team_id'], sel['channel_id'],
+                            sel.get('team_name', ''), sel.get('channel_name', ''), token
+                        )
                         all_context.extend(msgs)
+                        all_links.extend(msg_links)
 
-                        files = get_channel_files(sel['team_id'], sel['channel_id'], token)
-                        debug_lines.append(f"{sel['label']}: ファイル {len(files)} 件")
+                        files, file_links = get_channel_files(sel['team_id'], sel['channel_id'], token)
                         all_context.extend(files)
+                        all_links.extend(file_links)
 
-                        notes = get_channel_onenote(sel['team_id'], token)
-                        debug_lines.append(f"{sel['label']}: OneNote {len(notes)} 件")
+                        notes, note_links = get_channel_onenote(sel['team_id'], token)
                         all_context.extend(notes)
+                        all_links.extend(note_links)
 
                     progress.progress((idx + 1) / total)
 
-                total_chars = len("\n".join(all_context))
-                debug_lines.append(f"合計データ量: {total_chars} 文字")
-                st.session_state.debug_info = "\n".join(debug_lines)
+                st.session_state.evidence_links = all_links
 
                 if not all_context:
                     st.warning("データが取得できませんでした。")
@@ -362,7 +397,8 @@ if st.session_state.ms_token:
                         prompt = (
                             f"あなたは社内アシスタントです。以下のデータを元に質問に答えてください。\n\n"
                             f"【ルール】\n"
-                            f"・回答には必ずエビデンス（いつ・誰が・どのファイル）を付けてください\n"
+                            f"・回答には必ずエビデンス（いつ・誰が・どのOneNote/ファイル/メッセージ）を付けてください\n"
+                            f"・エビデンスにはデータ内のID（OneNoteID・ファイルID・メッセージID）を必ず含めてください\n"
                             f"・該当情報が複数あれば時系列で列挙してください\n"
                             f"・見つからない場合は「見つかりませんでした」と答えてください\n\n"
                             f"【質問】\n{question}\n\n"
@@ -374,20 +410,28 @@ if st.session_state.ms_token:
                         except Exception as e:
                             st.error(f"AI分析エラー: {e}")
 
+        # --- AI回答表示 ---
         if st.session_state.ai_answer:
             st.header("📊 AIの回答")
             st.markdown(st.session_state.ai_answer)
 
-        if st.session_state.debug_info:
-            with st.expander("🔧 取得データの内訳"):
-                st.text(st.session_state.debug_info)
-
-        # 取得したメッセージの中身を表示（デバッグ用）
-        if st.session_state.raw_messages:
-            with st.expander(f"📝 取得したメッセージ一覧（{len(st.session_state.raw_messages)}件）"):
-                for msg in st.session_state.raw_messages[:20]:
-                    st.write(f"**{msg['sender']}**（{msg['date']}）")
-                    st.write(msg['body'] if msg['body'] else "（本文なし）")
-                    if msg['attachments']:
-                        st.write(f"📎 {', '.join(msg['attachments'])}")
-                    st.divider()
+            # --- 記録資料リンク一覧 ---
+            if st.session_state.evidence_links:
+                st.header("🔗 記録資料一覧（元の記録へのリンク）")
+                
+                # 回答に登場したIDに対応するリンクを表示
+                answer_text = st.session_state.ai_answer
+                shown_links = []
+                for link in st.session_state.evidence_links:
+                    if link['id'] in answer_text and link['url']:
+                        shown_links.append(link)
+                
+                # 登場したリンクがあれば表示、なければ全部表示
+                display_links = shown_links if shown_links else st.session_state.evidence_links[:20]
+                
+                for link in display_links:
+                    icon = "📝" if link['type'] == 'message' else "📄" if link['type'] == 'file' else "📓"
+                    if link['url']:
+                        st.markdown(f"{icon} [{link['label']}]({link['url']})")
+                    else:
+                        st.markdown(f"{icon} {link['label']}")
