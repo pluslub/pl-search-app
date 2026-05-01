@@ -96,6 +96,19 @@ def extract_text_from_bytes(file_bytes_raw, file_name):
             text = "\n".join([p.text for p in doc.paragraphs])
         elif file_name.endswith('.txt'):
             text = file_bytes_raw.decode('utf-8', errors='ignore')
+        elif file_name.endswith('.pdf'):
+            # PDFテキスト抽出
+            try:
+                import pypdf
+                pdf_reader = pypdf.PdfReader(io.BytesIO(file_bytes_raw))
+                for page in pdf_reader.pages:
+                    text += page.extract_text() or ""
+            except ImportError:
+                try:
+                    import pdfminer.high_level
+                    text = pdfminer.high_level.extract_text(io.BytesIO(file_bytes_raw))
+                except Exception:
+                    text = "(PDF解析エラー: ライブラリが見つかりません)"
     except Exception as e:
         text = f"(解析エラー: {e})"
     return text[:4000]
@@ -134,7 +147,7 @@ def get_teams_and_channels(token):
             })
     return items
 
-def get_channel_messages(team_id, channel_id, team_name, channel_name, token):
+def get_channel_messages(team_id, channel_id, token):
     all_data = []
     links = []
     url = f"https://graph.microsoft.com/v1.0/teams/{team_id}/channels/{channel_id}/messages?$top=50"
@@ -143,8 +156,7 @@ def get_channel_messages(team_id, channel_id, team_name, channel_name, token):
         return all_data, links
 
     for msg in data.get('value', []):
-        raw_body = msg.get('body', {}).get('content', '')
-        body = strip_html(raw_body)
+        body = strip_html(msg.get('body', {}).get('content', ''))
         sender = msg.get('from', {})
         user = sender.get('user', {}) if sender else {}
         name = user.get('displayName', '不明') if user else '不明'
@@ -156,9 +168,7 @@ def get_channel_messages(team_id, channel_id, team_name, channel_name, token):
         except Exception:
             date_str = created
 
-        # TeamsメッセージへのディープリンクURL
         teams_link = f"https://teams.microsoft.com/l/message/{channel_id}/{msg_id}?groupId={team_id}&tenantId={MS_TENANT_ID}"
-
         attachments = msg.get('attachments', [])
         att_names = [a.get('name', '') for a in attachments if a.get('name')]
 
@@ -173,7 +183,6 @@ def get_channel_messages(team_id, channel_id, team_name, channel_name, token):
                 'type': 'message',
                 'label': f"{name}（{date_str}）",
                 'url': teams_link,
-                'detail': body[:100] or ', '.join(att_names),
             })
 
         # 返信
@@ -205,7 +214,6 @@ def get_channel_messages(team_id, channel_id, team_name, channel_name, token):
                         'type': 'message',
                         'label': f"{rname}（{rdate_str}）",
                         'url': reply_link,
-                        'detail': rbody[:100] or ', '.join(ratt_names),
                     })
 
     return all_data, links
@@ -237,10 +245,10 @@ def get_channel_files(team_id, channel_id, token):
             'type': 'file',
             'label': name,
             'url': web_url,
-            'detail': name,
         })
-        if not name.endswith(('.xlsx', '.xlsm', '.docx', '.txt')):
-            all_data.append(f"[ファイルID:{file_item_id}] ファイル: {name}（{web_url}）: ※未対応形式")
+        supported = ('.xlsx', '.xlsm', '.docx', '.txt', '.pdf')
+        if not name.endswith(supported):
+            all_data.append(f"[ファイルID:{file_item_id}] ファイル: {name}: ※未対応形式")
             continue
         content = download_file_content(file_drive_id, file_item_id, token)
         if content:
@@ -260,7 +268,6 @@ def get_channel_onenote(team_id, token):
         page_id = page.get('id', '')
         title = page.get('title', '無題')
         created = page.get('createdDateTime', '')
-        # OneNoteページのリンク
         page_links = page.get('links', {})
         one_note_url = page_links.get('oneNoteWebUrl', {}).get('href', '')
         try:
@@ -278,9 +285,8 @@ def get_channel_onenote(team_id, token):
                 links.append({
                     'id': page_id,
                     'type': 'onenote',
-                    'label': f"OneNote: {title}（{date_str}）",
+                    'label': f"📓 {title}（{date_str}）",
                     'url': one_note_url,
-                    'detail': title,
                 })
     return all_data, links
 
@@ -288,7 +294,7 @@ def get_channel_onenote(team_id, token):
 # UI
 # ======================
 st.title("🔍 Plusらぼ AI検索アシスタント")
-st.caption("メッセージ・ファイル・OneNoteを横断検索し、AIがエビデンス付きで回答します")
+st.caption("メッセージ・ファイル・OneNote・PDFを横断検索し、AIが関連情報をまとめて回答します")
 
 app = get_msal_app()
 
@@ -344,7 +350,7 @@ if st.session_state.ms_token:
 
         question = st.text_input(
             "💬 質問を入力してください",
-            placeholder="例：角谷さんが興味ありそうな求人は？"
+            placeholder="例：Aさんの体調変化について"
         )
 
         if st.button("🚀 AIに聞く"):
@@ -367,8 +373,7 @@ if st.session_state.ms_token:
 
                     if sel['type'] == 'channel':
                         msgs, msg_links = get_channel_messages(
-                            sel['team_id'], sel['channel_id'],
-                            sel.get('team_name', ''), sel.get('channel_name', ''), token
+                            sel['team_id'], sel['channel_id'], token
                         )
                         all_context.extend(msgs)
                         all_links.extend(msg_links)
@@ -395,10 +400,12 @@ if st.session_state.ms_token:
                     with st.spinner("🤖 AIが分析中..."):
                         model = get_working_model()
                         prompt = (
-                            f"あなたは社内アシスタントです。以下のデータを元に質問に答えてください。\n\n"
-                            f"【ルール】\n"
-                            f"・回答には必ずエビデンス（いつ・誰が・どのOneNote/ファイル/メッセージ）を付けてください\n"
-                            f"・エビデンスにはデータ内のID（OneNoteID・ファイルID・メッセージID）を必ず含めてください\n"
+                            f"あなたは福祉施設の社内アシスタントです。以下のデータを元に質問に答えてください。\n\n"
+                            f"【重要なルール】\n"
+                            f"・質問のキーワードだけでなく、関連する言葉・概念・状況も幅広く拾ってください\n"
+                            f"  例：「体調変化」→ 吐き気、頭痛、発熱、欠席、体調不良、病院、薬、しんどい、具合が悪い なども対象\n"
+                            f"  例：「就労意欲」→ 働きたい、仕事、求人、面接、やる気、モチベーション なども対象\n"
+                            f"・回答には必ず記録資料（いつ・誰が・どのOneNote/ファイル/メッセージ）のIDを含めてください\n"
                             f"・該当情報が複数あれば時系列で列挙してください\n"
                             f"・見つからない場合は「見つかりませんでした」と答えてください\n\n"
                             f"【質問】\n{question}\n\n"
@@ -417,21 +424,15 @@ if st.session_state.ms_token:
 
             # --- 記録資料リンク一覧 ---
             if st.session_state.evidence_links:
-                st.header("🔗 記録資料一覧（元の記録へのリンク）")
-                
-                # 回答に登場したIDに対応するリンクを表示
+                st.header("🔗 記録資料一覧")
                 answer_text = st.session_state.ai_answer
-                shown_links = []
-                for link in st.session_state.evidence_links:
-                    if link['id'] in answer_text and link['url']:
-                        shown_links.append(link)
-                
-                # 登場したリンクがあれば表示、なければ全部表示
-                display_links = shown_links if shown_links else st.session_state.evidence_links[:20]
-                
+                shown_links = [
+                    link for link in st.session_state.evidence_links
+                    if link['id'] in answer_text and link['url']
+                ]
+                display_links = shown_links if shown_links else [
+                    l for l in st.session_state.evidence_links[:20] if l['url']
+                ]
                 for link in display_links:
                     icon = "📝" if link['type'] == 'message' else "📄" if link['type'] == 'file' else "📓"
-                    if link['url']:
-                        st.markdown(f"{icon} [{link['label']}]({link['url']})")
-                    else:
-                        st.markdown(f"{icon} {link['label']}")
+                    st.markdown(f"{icon} [{link['label']}]({link['url']})")
