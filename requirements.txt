@@ -4,3 +4,4 @@ msal
 requests
 python-docx
 openpyxl
+pypdf
