@@ -287,7 +287,7 @@ def get_channel_onenote(team_id, token):
 # ======================
 # UI
 # ======================
-st.title("🔍 Teams AI検索アシスタント")
+st.title("🔍 Plusらぼ AI検索アシスタント")
 st.caption("メッセージ・ファイル・OneNoteを横断検索し、AIがエビデンス付きで回答します")
 
 app = get_msal_app()
