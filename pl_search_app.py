@@ -7,13 +7,17 @@ from docx import Document
 from datetime import datetime
 import openpyxl
 import re
+from supabase import create_client
 
 # --- 設定情報 ---
 GEMINI_API_KEY = st.secrets["GEMINI_API_KEY"]
 MS_CLIENT_ID = st.secrets["MS_CLIENT_ID"]
 MS_TENANT_ID = st.secrets["MS_TENANT_ID"]
+SUPABASE_URL = st.secrets["SUPABASE_URL"]
+SUPABASE_KEY = st.secrets["SUPABASE_KEY"]
 
 genai.configure(api_key=GEMINI_API_KEY)
+supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
 
 SCOPES = [
     "Files.Read.All",
@@ -97,21 +101,59 @@ def extract_text_from_bytes(file_bytes_raw, file_name):
         elif file_name.endswith('.txt'):
             text = file_bytes_raw.decode('utf-8', errors='ignore')
         elif file_name.endswith('.pdf'):
-            # PDFテキスト抽出
             try:
                 import pypdf
                 pdf_reader = pypdf.PdfReader(io.BytesIO(file_bytes_raw))
                 for page in pdf_reader.pages:
                     text += page.extract_text() or ""
-            except ImportError:
-                try:
-                    import pdfminer.high_level
-                    text = pdfminer.high_level.extract_text(io.BytesIO(file_bytes_raw))
-                except Exception:
-                    text = "(PDF解析エラー: ライブラリが見つかりません)"
+            except Exception:
+                text = "(PDF解析エラー)"
     except Exception as e:
         text = f"(解析エラー: {e})"
     return text[:4000]
+
+# --- Supabaseにドキュメントを保存 ---
+def save_document(source_type, source_id, title, content, author, recorded_at, url, channel_name, team_name):
+    if not content or not content.strip():
+        return
+    try:
+        # 既存チェック
+        existing = supabase.table("documents").select("id").eq("source_id", source_id).execute()
+        if existing.data:
+            # 更新
+            supabase.table("documents").update({
+                "content": content,
+                "updated_at": datetime.now().isoformat(),
+            }).eq("source_id", source_id).execute()
+        else:
+            # 新規保存
+            supabase.table("documents").insert({
+                "source_type": source_type,
+                "source_id": source_id,
+                "title": title,
+                "content": content,
+                "author": author,
+                "recorded_at": recorded_at,
+                "url": url,
+                "channel_name": channel_name,
+                "team_name": team_name,
+            }).execute()
+    except Exception as e:
+        st.warning(f"DB保存エラー: {e}")
+
+# --- Supabaseから検索 ---
+def search_documents(query_text, channel_names=None):
+    try:
+        query = supabase.table("documents").select("*")
+        if channel_names:
+            query = query.in_("channel_name", channel_names)
+        # テキスト検索
+        query = query.ilike("content", f"%{query_text}%")
+        result = query.limit(50).execute()
+        return result.data or []
+    except Exception as e:
+        st.warning(f"DB検索エラー: {e}")
+        return []
 
 def get_teams_and_channels(token):
     items = []
@@ -147,148 +189,98 @@ def get_teams_and_channels(token):
             })
     return items
 
-def get_channel_messages(team_id, channel_id, token):
-    all_data = []
-    links = []
+def index_channel(sel, token):
+    """チャンネルのデータをSupabaseにインデックス化"""
+    team_id = sel['team_id']
+    channel_id = sel['channel_id']
+    team_name = sel.get('team_name', '')
+    channel_name = sel.get('channel_name', '')
+    count = 0
+
+    # メッセージ
     url = f"https://graph.microsoft.com/v1.0/teams/{team_id}/channels/{channel_id}/messages?$top=50"
     data = graph_get(url, token)
-    if not data:
-        return all_data, links
+    if data:
+        for msg in data.get('value', []):
+            body = strip_html(msg.get('body', {}).get('content', ''))
+            sender = msg.get('from', {})
+            user = sender.get('user', {}) if sender else {}
+            name = user.get('displayName', '不明') if user else '不明'
+            created = msg.get('createdDateTime', '')
+            msg_id = msg.get('id', '')
+            teams_link = f"https://teams.microsoft.com/l/message/{channel_id}/{msg_id}?groupId={team_id}&tenantId={MS_TENANT_ID}"
+            atts = msg.get('attachments', [])
+            att_names = [a.get('name', '') for a in atts if a.get('name')]
+            full_content = body
+            if att_names:
+                full_content += f" [添付: {', '.join(att_names)}]"
+            if full_content.strip():
+                save_document('message', msg_id, None, full_content, name, created, teams_link, channel_name, team_name)
+                count += 1
 
-    for msg in data.get('value', []):
-        body = strip_html(msg.get('body', {}).get('content', ''))
-        sender = msg.get('from', {})
-        user = sender.get('user', {}) if sender else {}
-        name = user.get('displayName', '不明') if user else '不明'
-        created = msg.get('createdDateTime', '')
-        msg_id = msg.get('id', '')
-        try:
-            dt = datetime.fromisoformat(created.replace('Z', '+00:00'))
-            date_str = dt.strftime('%Y/%m/%d %H:%M')
-        except Exception:
-            date_str = created
-
-        teams_link = f"https://teams.microsoft.com/l/message/{channel_id}/{msg_id}?groupId={team_id}&tenantId={MS_TENANT_ID}"
-        attachments = msg.get('attachments', [])
-        att_names = [a.get('name', '') for a in attachments if a.get('name')]
-
-        entry = f"[メッセージID:{msg_id}] {name}（{date_str}）: {body}"
-        if att_names:
-            entry += f" [添付: {', '.join(att_names)}]"
-
-        if body or att_names:
-            all_data.append(entry[:500])
-            links.append({
-                'id': msg_id,
-                'type': 'message',
-                'label': f"{name}（{date_str}）",
-                'url': teams_link,
-            })
-
-        # 返信
-        reply_url = f"https://graph.microsoft.com/v1.0/teams/{team_id}/channels/{channel_id}/messages/{msg_id}/replies?$top=20"
-        reply_data = graph_get(reply_url, token)
-        if reply_data:
-            for reply in reply_data.get('value', []):
-                rbody = strip_html(reply.get('body', {}).get('content', ''))
-                rsender = reply.get('from', {})
-                ruser = rsender.get('user', {}) if rsender else {}
-                rname = ruser.get('displayName', '不明') if ruser else '不明'
-                rcreated = reply.get('createdDateTime', '')
-                reply_id = reply.get('id', '')
-                try:
-                    rdt = datetime.fromisoformat(rcreated.replace('Z', '+00:00'))
-                    rdate_str = rdt.strftime('%Y/%m/%d %H:%M')
-                except Exception:
-                    rdate_str = rcreated
-                ratts = reply.get('attachments', [])
-                ratt_names = [a.get('name', '') for a in ratts if a.get('name')]
-                rentry = f"[メッセージID:{reply_id}] {rname}（{rdate_str}）: {rbody}"
-                if ratt_names:
-                    rentry += f" [添付: {', '.join(ratt_names)}]"
-                if rbody or ratt_names:
-                    all_data.append(rentry[:500])
+            # 返信
+            reply_url = f"https://graph.microsoft.com/v1.0/teams/{team_id}/channels/{channel_id}/messages/{msg_id}/replies?$top=20"
+            reply_data = graph_get(reply_url, token)
+            if reply_data:
+                for reply in reply_data.get('value', []):
+                    rbody = strip_html(reply.get('body', {}).get('content', ''))
+                    rsender = reply.get('from', {})
+                    ruser = rsender.get('user', {}) if rsender else {}
+                    rname = ruser.get('displayName', '不明') if ruser else '不明'
+                    rcreated = reply.get('createdDateTime', '')
+                    reply_id = reply.get('id', '')
                     reply_link = f"https://teams.microsoft.com/l/message/{channel_id}/{reply_id}?groupId={team_id}&tenantId={MS_TENANT_ID}"
-                    links.append({
-                        'id': reply_id,
-                        'type': 'message',
-                        'label': f"{rname}（{rdate_str}）",
-                        'url': reply_link,
-                    })
+                    if rbody.strip():
+                        save_document('message', reply_id, None, rbody, rname, rcreated, reply_link, channel_name, team_name)
+                        count += 1
 
-    return all_data, links
+    # ファイル
+    folder_url = f"https://graph.microsoft.com/v1.0/teams/{team_id}/channels/{channel_id}/filesFolder"
+    folder_data = graph_get(folder_url, token)
+    if folder_data:
+        drive_id = folder_data.get('parentReference', {}).get('driveId')
+        item_id = folder_data.get('id')
+        if drive_id and item_id:
+            children_url = f"https://graph.microsoft.com/v1.0/drives/{drive_id}/items/{item_id}/children?$top=50"
+            children_data = graph_get(children_url, token)
+            if children_data:
+                for item in children_data.get('value', []):
+                    if 'file' not in item:
+                        continue
+                    name = item['name']
+                    web_url = item.get('webUrl', '')
+                    file_item_id = item['id']
+                    file_drive_id = item.get('parentReference', {}).get('driveId', drive_id)
+                    supported = ('.xlsx', '.xlsm', '.docx', '.txt', '.pdf')
+                    if not name.endswith(supported):
+                        continue
+                    content = download_file_content(file_drive_id, file_item_id, token)
+                    if content:
+                        text = extract_text_from_bytes(content, name)
+                        if text:
+                            save_document('file', file_item_id, name, text, None, None, web_url, channel_name, team_name)
+                            count += 1
 
-def get_channel_files(team_id, channel_id, token):
-    all_data = []
-    links = []
-    url = f"https://graph.microsoft.com/v1.0/teams/{team_id}/channels/{channel_id}/filesFolder"
-    data = graph_get(url, token)
-    if not data:
-        return all_data, links
-    drive_id = data.get('parentReference', {}).get('driveId')
-    item_id = data.get('id')
-    if not drive_id or not item_id:
-        return all_data, links
-    children_url = f"https://graph.microsoft.com/v1.0/drives/{drive_id}/items/{item_id}/children?$top=50"
-    children_data = graph_get(children_url, token)
-    if not children_data:
-        return all_data, links
-    for item in children_data.get('value', []):
-        if 'file' not in item:
-            continue
-        name = item['name']
-        web_url = item.get('webUrl', '')
-        file_item_id = item['id']
-        file_drive_id = item.get('parentReference', {}).get('driveId', drive_id)
-        links.append({
-            'id': file_item_id,
-            'type': 'file',
-            'label': name,
-            'url': web_url,
-        })
-        supported = ('.xlsx', '.xlsm', '.docx', '.txt', '.pdf')
-        if not name.endswith(supported):
-            all_data.append(f"[ファイルID:{file_item_id}] ファイル: {name}: ※未対応形式")
-            continue
-        content = download_file_content(file_drive_id, file_item_id, token)
-        if content:
-            text = extract_text_from_bytes(content, name)
-            if text:
-                all_data.append(f"[ファイルID:{file_item_id}] ファイル: {name}（{web_url}）:\n{text[:2000]}")
-    return all_data, links
-
-def get_channel_onenote(team_id, token):
-    all_data = []
-    links = []
+    # OneNote
     pages_url = f"https://graph.microsoft.com/v1.0/groups/{team_id}/onenote/pages?$top=50&$select=id,title,createdDateTime,links"
     pages_data = graph_get(pages_url, token)
-    if not pages_data:
-        return all_data, links
-    for page in pages_data.get('value', []):
-        page_id = page.get('id', '')
-        title = page.get('title', '無題')
-        created = page.get('createdDateTime', '')
-        page_links = page.get('links', {})
-        one_note_url = page_links.get('oneNoteWebUrl', {}).get('href', '')
-        try:
-            dt = datetime.fromisoformat(created.replace('Z', '+00:00'))
-            date_str = dt.strftime('%Y/%m/%d')
-        except Exception:
-            date_str = created
-        content_url = f"https://graph.microsoft.com/v1.0/groups/{team_id}/onenote/pages/{page_id}/content"
-        headers = {'Authorization': f'Bearer {token}'}
-        res = requests.get(content_url, headers=headers)
-        if res.status_code == 200:
-            body = strip_html(res.text)
-            if body.strip():
-                all_data.append(f"[OneNoteID:{page_id}] OneNote: {title}（{date_str}）:\n{body[:3000]}")
-                links.append({
-                    'id': page_id,
-                    'type': 'onenote',
-                    'label': f"📓 {title}（{date_str}）",
-                    'url': one_note_url,
-                })
-    return all_data, links
+    if pages_data:
+        for page in pages_data.get('value', []):
+            page_id = page.get('id', '')
+            title = page.get('title', '無題')
+            created = page.get('createdDateTime', '')
+            page_links = page.get('links', {})
+            one_note_url = page_links.get('oneNoteWebUrl', {}).get('href', '')
+            content_url = f"https://graph.microsoft.com/v1.0/groups/{team_id}/onenote/pages/{page_id}/content"
+            headers = {'Authorization': f'Bearer {token}'}
+            res = requests.get(content_url, headers=headers)
+            if res.status_code == 200:
+                body = strip_html(res.text)
+                if body.strip():
+                    save_document('onenote', page_id, title, body, None, created, one_note_url, channel_name, team_name)
+                    count += 1
+
+    return count
 
 # ======================
 # UI
@@ -342,102 +334,163 @@ if st.session_state.ms_token:
 
     if channels:
         labels = [ch['label'] for ch in channels]
-        selected_indices = st.multiselect(
-            "📂 検索先を選んでください（複数選択可）",
-            range(len(labels)),
-            format_func=lambda i: labels[i],
-        )
 
-        question = st.text_input(
-            "💬 質問を入力してください",
-            placeholder="例：Aさんの体調変化について"
-        )
+        # タブで「検索」と「インデックス更新」を切り替え
+        tab1, tab2 = st.tabs(["🔍 検索", "🔄 インデックス更新"])
 
-        if st.button("🚀 AIに聞く"):
-            if not selected_indices:
-                st.warning("検索先を選んでください。")
-            elif not question:
-                st.warning("質問を入力してください。")
-            else:
-                st.session_state.ai_answer = ""
-                st.session_state.evidence_links = []
-                all_context = []
-                all_links = []
+        with tab1:
+            selected_indices = st.multiselect(
+                "📂 検索先を選んでください（複数選択可）",
+                range(len(labels)),
+                format_func=lambda i: labels[i],
+            )
 
-                progress = st.progress(0)
-                total = len(selected_indices)
+            question = st.text_input(
+                "💬 質問を入力してください",
+                placeholder="例：Aさんの体調変化について"
+            )
 
-                for idx, sel_i in enumerate(selected_indices):
-                    sel = channels[sel_i]
-                    st.write(f"📡 {sel['label']} のデータを取得中...")
-
-                    if sel['type'] == 'channel':
-                        msgs, msg_links = get_channel_messages(
-                            sel['team_id'], sel['channel_id'], token
-                        )
-                        all_context.extend(msgs)
-                        all_links.extend(msg_links)
-
-                        files, file_links = get_channel_files(sel['team_id'], sel['channel_id'], token)
-                        all_context.extend(files)
-                        all_links.extend(file_links)
-
-                        notes, note_links = get_channel_onenote(sel['team_id'], token)
-                        all_context.extend(notes)
-                        all_links.extend(note_links)
-
-                    progress.progress((idx + 1) / total)
-
-                st.session_state.evidence_links = all_links
-
-                if not all_context:
-                    st.warning("データが取得できませんでした。")
+            if st.button("🚀 AIに聞く"):
+                if not selected_indices:
+                    st.warning("検索先を選んでください。")
+                elif not question:
+                    st.warning("質問を入力してください。")
                 else:
-                    context_text = "\n".join(all_context)
-                    if len(context_text) > 50000:
-                        context_text = context_text[:50000]
+                    st.session_state.ai_answer = ""
+                    st.session_state.evidence_links = []
 
-                    with st.spinner("🤖 AIが分析中..."):
-                        model = get_working_model()
-                        prompt = (
-                            f"あなたは福祉施設の支援記録を管理する社内アシスタントです。以下のデータを元に質問に答えてください。\n\n"
-                            f"【重要なルール】\n"
-                            f"・質問のキーワードだけでなく、福祉現場で関連するあらゆる言葉・状況を幅広く拾ってください\n"
-                            f"・以下のカテゴリを横断的に検索してください：\n"
-                            f"  【身体・体調】吐き気、頭痛、発熱、欠席、体調不良、病院、薬、しんどい、具合が悪い、疲れ、痛み、食欲\n"
-                            f"  【特性・行動】強迫行動、こだわり、繰り返し、確認行動、パニック、癇癪、自傷、他害、多動\n"
-                            f"  【感情・精神状態】不安、緊張、落ち着かない、イライラ、気分、うつ、意欲低下、孤立、混乱\n"
-                            f"  【感覚過敏・苦手】音、光、においが苦手、触覚過敏、雷、人混み、外出しづらい\n"
-                            f"  【生活・就労】外出、通所、欠席、就労、求人、面接、作業、人間関係\n"
-                            f"・回答には必ず記録資料（いつ・誰が・どのOneNote/ファイル/メッセージ）のIDを含めてください\n"
-                            f"・該当情報が複数あれば時系列で列挙してください\n"
-                            f"・直接的な言葉がなくても、文脈から関連すると判断できる情報も含めてください\n"
-                            f"・見つからない場合は「見つかりませんでした」と答えてください\n\n"
-                            f"【質問】\n{question}\n\n"
-                            f"【データ】\n{context_text}"
-                        )
-                        try:
-                            ai_res = model.generate_content(prompt)
-                            st.session_state.ai_answer = ai_res.text.strip()
-                        except Exception as e:
-                            st.error(f"AI分析エラー: {e}")
+                    # 選択したチャンネル名一覧
+                    selected_channel_names = [
+                        channels[i].get('channel_name') for i in selected_indices
+                        if channels[i].get('channel_name')
+                    ]
 
-        # --- AI回答表示 ---
-        if st.session_state.ai_answer:
-            st.header("📊 AIの回答")
-            st.markdown(st.session_state.ai_answer)
+                    with st.spinner("DBから検索中..."):
+                        # DBから検索（キーワードを複数に分割して検索）
+                        keywords = question.replace('について', '').replace('の', ' ').split()
+                        all_docs = []
+                        seen_ids = set()
+                        for kw in keywords[:3]:  # 最大3キーワード
+                            if len(kw) < 2:
+                                continue
+                            docs = search_documents(kw, selected_channel_names)
+                            for doc in docs:
+                                if doc['id'] not in seen_ids:
+                                    all_docs.append(doc)
+                                    seen_ids.add(doc['id'])
 
-            # --- 記録資料リンク一覧 ---
-            if st.session_state.evidence_links:
-                st.header("🔗 記録資料一覧")
-                answer_text = st.session_state.ai_answer
-                shown_links = [
-                    link for link in st.session_state.evidence_links
-                    if link['id'] in answer_text and link['url']
-                ]
-                display_links = shown_links if shown_links else [
-                    l for l in st.session_state.evidence_links[:20] if l['url']
-                ]
-                for link in display_links:
-                    icon = "📝" if link['type'] == 'message' else "📄" if link['type'] == 'file' else "📓"
-                    st.markdown(f"{icon} [{link['label']}]({link['url']})")
+                    if not all_docs:
+                        st.warning("DBにデータがありません。「インデックス更新」タブでデータを取り込んでください。")
+                    else:
+                        # コンテキスト作成
+                        all_context = []
+                        all_links = []
+                        for doc in all_docs:
+                            source_type = doc.get('source_type', '')
+                            source_id = doc.get('source_id', '')
+                            title = doc.get('title', '')
+                            content = doc.get('content', '')
+                            author = doc.get('author', '不明')
+                            recorded_at = doc.get('recorded_at', '')
+                            url = doc.get('url', '')
+                            channel_name = doc.get('channel_name', '')
+
+                            try:
+                                dt = datetime.fromisoformat(recorded_at.replace('Z', '+00:00')) if recorded_at else None
+                                date_str = dt.strftime('%Y/%m/%d %H:%M') if dt else ''
+                            except Exception:
+                                date_str = recorded_at
+
+                            if source_type == 'message':
+                                entry = f"[メッセージID:{source_id}] {author}（{date_str}）: {content[:500]}"
+                                icon = "📝"
+                                label = f"{author}（{date_str}）"
+                            elif source_type == 'file':
+                                entry = f"[ファイルID:{source_id}] ファイル: {title}:\n{content[:1000]}"
+                                icon = "📄"
+                                label = title or source_id
+                            else:
+                                entry = f"[OneNoteID:{source_id}] OneNote: {title}（{date_str}）:\n{content[:2000]}"
+                                icon = "📓"
+                                label = f"{title}（{date_str}）"
+
+                            all_context.append(entry)
+                            all_links.append({
+                                'id': source_id,
+                                'type': source_type,
+                                'label': f"{icon} {label}",
+                                'url': url,
+                            })
+
+                        st.session_state.evidence_links = all_links
+
+                        context_text = "\n".join(all_context)
+                        if len(context_text) > 50000:
+                            context_text = context_text[:50000]
+
+                        with st.spinner("🤖 AIが分析中..."):
+                            model = get_working_model()
+                            prompt = (
+                                f"あなたは福祉施設の支援記録を管理する社内アシスタントです。以下のデータを元に質問に答えてください。\n\n"
+                                f"【重要なルール】\n"
+                                f"・質問のキーワードだけでなく、福祉現場で関連するあらゆる言葉・状況を幅広く拾ってください\n"
+                                f"・以下のカテゴリを横断的に検索してください：\n"
+                                f"  【身体・体調】吐き気、頭痛、発熱、欠席、体調不良、病院、薬、しんどい、具合が悪い、疲れ、痛み、食欲\n"
+                                f"  【特性・行動】強迫行動、こだわり、繰り返し、確認行動、パニック、癇癪、自傷、他害、多動\n"
+                                f"  【感情・精神状態】不安、緊張、落ち着かない、イライラ、気分、うつ、意欲低下、孤立、混乱\n"
+                                f"  【感覚過敏・苦手】音、光、においが苦手、触覚過敏、雷、人混み、外出しづらい\n"
+                                f"  【生活・就労】外出、通所、欠席、就労、求人、面接、作業、人間関係\n"
+                                f"・回答には必ず記録資料（いつ・誰が・どのOneNote/ファイル/メッセージ）のIDを含めてください\n"
+                                f"・該当情報が複数あれば時系列で列挙してください\n"
+                                f"・直接的な言葉がなくても、文脈から関連すると判断できる情報も含めてください\n"
+                                f"・見つからない場合は「見つかりませんでした」と答えてください\n\n"
+                                f"【質問】\n{question}\n\n"
+                                f"【データ】\n{context_text}"
+                            )
+                            try:
+                                ai_res = model.generate_content(prompt)
+                                st.session_state.ai_answer = ai_res.text.strip()
+                            except Exception as e:
+                                st.error(f"AI分析エラー: {e}")
+
+            if st.session_state.ai_answer:
+                st.header("📊 AIの回答")
+                st.markdown(st.session_state.ai_answer)
+
+                if st.session_state.evidence_links:
+                    st.header("🔗 記録資料一覧")
+                    answer_text = st.session_state.ai_answer
+                    shown_links = [
+                        link for link in st.session_state.evidence_links
+                        if link['id'] in answer_text and link['url']
+                    ]
+                    display_links = shown_links if shown_links else [
+                        l for l in st.session_state.evidence_links[:20] if l['url']
+                    ]
+                    for link in display_links:
+                        st.markdown(f"[{link['label']}]({link['url']})")
+
+        with tab2:
+            st.write("選択したチャンネルのデータをDBに取り込みます。初回や新しい記録が増えたときに実行してください。")
+
+            index_indices = st.multiselect(
+                "📂 インデックス化するチャンネルを選んでください",
+                range(len(labels)),
+                format_func=lambda i: labels[i],
+                key="index_select"
+            )
+
+            if st.button("🔄 インデックス更新を実行"):
+                if not index_indices:
+                    st.warning("チャンネルを選んでください。")
+                else:
+                    total_count = 0
+                    for sel_i in index_indices:
+                        sel = channels[sel_i]
+                        if sel['type'] != 'channel':
+                            continue
+                        with st.spinner(f"{sel['label']} を取り込み中..."):
+                            count = index_channel(sel, token)
+                            total_count += count
+                            st.write(f"✅ {sel['label']}: {count} 件保存しました")
+                    st.success(f"🎉 合計 {total_count} 件のデータをDBに保存しました！")
