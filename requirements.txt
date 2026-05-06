@@ -5,3 +5,4 @@ requests
 python-docx
 openpyxl
 pypdf
+supabase
