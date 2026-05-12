@@ -4,5 +4,5 @@ msal
 requests
 python-docx
 openpyxl
-pypdf
+pymupdf
 supabase
