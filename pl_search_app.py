@@ -4,7 +4,7 @@ import requests
 import streamlit as st
 import google.generativeai as genai
 from docx import Document
-from datetime import datetime
+from datetime import datetime, timedelta
 import openpyxl
 import re
 from supabase import create_client
@@ -276,12 +276,17 @@ def index_channel(sel, token):
     channel_name = sel.get('channel_name', '')
     count = 0
 
+    one_year_ago = (datetime.utcnow() - timedelta(days=365)).strftime('%Y-%m-%dT%H:%M:%SZ')
     msg_url = (
         "https://graph.microsoft.com/v1.0/teams/"
-        + team_id + "/channels/" + channel_id + "/messages?$top=50"
+        + team_id + "/channels/" + channel_id
+        + "/messages?$top=50&$filter=createdDateTime ge " + one_year_ago
     )
-    data = graph_get(msg_url, token)
-    if data:
+    while msg_url:
+        data = graph_get(msg_url, token)
+        if not data:
+            break
+        msg_url = data.get('@odata.nextLink')
         for msg in data.get('value', []):
             body = strip_html(msg.get('body', {}).get('content', ''))
             sender = msg.get('from', {})
