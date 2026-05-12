@@ -123,18 +123,21 @@ def extract_text_from_bytes(file_bytes_raw, file_name):
 
 
 def get_embedding(text):
-    url = (
-        "https://generativelanguage.googleapis.com/v1/models/"
-        "text-embedding-004:embedContent"
-    )
-    body = {
-        "model": "models/text-embedding-004",
-        "content": {"parts": [{"text": text[:2000]}]},
-        "taskType": "RETRIEVAL_DOCUMENT"
-    }
-    res = requests.post(url, json=body, params={"key": GEMINI_API_KEY})
+    for model_name in ["text-embedding-004", "embedding-001"]:
+        url = (
+            "https://generativelanguage.googleapis.com/v1beta/models/"
+            + model_name + ":embedContent"
+        )
+        body = {
+            "model": "models/" + model_name,
+            "content": {"parts": [{"text": text[:2000]}]},
+            "taskType": "RETRIEVAL_DOCUMENT"
+        }
+        res = requests.post(url, json=body, params={"key": GEMINI_API_KEY})
+        if res.status_code == 200:
+            return res.json()["embedding"]["values"]
     res.raise_for_status()
-    return res.json()["embedding"]["values"]
+    return []
 
 
 # --- Supabaseにドキュメントを保存 ---
@@ -170,18 +173,24 @@ def save_document(source_type, source_id, title, content, author, recorded_at, u
 # --- Supabaseからベクトル検索 ---
 def search_documents(query_text, channel_names=None):
     try:
-        embed_url = (
-            "https://generativelanguage.googleapis.com/v1/models/"
-            "text-embedding-004:embedContent"
-        )
-        embed_body = {
-            "model": "models/text-embedding-004",
-            "content": {"parts": [{"text": query_text}]},
-            "taskType": "RETRIEVAL_QUERY"
-        }
-        embed_res = requests.post(embed_url, json=embed_body, params={"key": GEMINI_API_KEY})
-        embed_res.raise_for_status()
-        query_embedding = embed_res.json()["embedding"]["values"]
+        query_embedding = None
+        for model_name in ["text-embedding-004", "embedding-001"]:
+            embed_url = (
+                "https://generativelanguage.googleapis.com/v1beta/models/"
+                + model_name + ":embedContent"
+            )
+            embed_body = {
+                "model": "models/" + model_name,
+                "content": {"parts": [{"text": query_text}]},
+                "taskType": "RETRIEVAL_QUERY"
+            }
+            embed_res = requests.post(embed_url, json=embed_body, params={"key": GEMINI_API_KEY})
+            if embed_res.status_code == 200:
+                query_embedding = embed_res.json()["embedding"]["values"]
+                break
+        if not query_embedding:
+            st.warning("embeddingモデルが見つかりませんでした。")
+            return []
         result = supabase.rpc("match_documents", {
             "query_embedding": query_embedding,
             "match_threshold": 0.5,
