@@ -124,7 +124,7 @@ def extract_text_from_bytes(file_bytes_raw, file_name):
 
 def get_embedding(text):
     result = genai.embed_content(
-        model="models/text-embedding-004",
+        model="models/embedding-001",
         content=text[:2000],
         task_type="retrieval_document"
     )
@@ -165,7 +165,7 @@ def save_document(source_type, source_id, title, content, author, recorded_at, u
 def search_documents(query_text, channel_names=None):
     try:
         query_embedding = genai.embed_content(
-            model="models/text-embedding-004",
+            model="models/embedding-001",
             content=query_text,
             task_type="retrieval_query"
         )['embedding']
