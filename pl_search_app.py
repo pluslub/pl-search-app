@@ -111,12 +111,24 @@ def extract_text_from_bytes(file_bytes_raw, file_name):
             text = file_bytes_raw.decode('utf-8', errors='ignore')
         elif file_name.endswith('.pdf'):
             try:
-                import pypdf
-                pdf_reader = pypdf.PdfReader(io.BytesIO(file_bytes_raw))
-                for page in pdf_reader.pages:
-                    text += page.extract_text() or ""
-            except Exception:
-                text = "(PDF解析エラー)"
+                import fitz
+                import base64
+                pdf = fitz.open(stream=file_bytes_raw, filetype="pdf")
+                for page in pdf:
+                    img = page.get_pixmap(dpi=150)
+                    b64 = base64.b64encode(img.tobytes("png")).decode()
+                    vision_res = requests.post(
+                        "https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent",
+                        params={"key": GEMINI_API_KEY},
+                        json={"contents": [{"parts": [
+                            {"text": "この画像に書かれている文字をすべて読み取って、そのまま出力してください。"},
+                            {"inline_data": {"mime_type": "image/png", "data": b64}}
+                        ]}]}
+                    )
+                    if vision_res.status_code == 200:
+                        text += vision_res.json()["candidates"][0]["content"]["parts"][0]["text"]
+            except Exception as e:
+                text = "(PDF解析エラー: " + str(e) + ")"
     except Exception as e:
         text = "(解析エラー: " + str(e) + ")"
     return text[:4000]
@@ -137,6 +149,7 @@ def get_embed_model_name():
     return None
 
 def get_embedding(text):
+    import time
     model_name = get_embed_model_name()
     if not model_name:
         raise Exception("利用可能なembeddingモデルが見つかりません")
@@ -149,9 +162,16 @@ def get_embedding(text):
         "content": {"parts": [{"text": text[:2000]}]},
         "taskType": "RETRIEVAL_DOCUMENT"
     }
-    res = requests.post(url, json=body, params={"key": GEMINI_API_KEY})
+    for attempt in range(5):
+        res = requests.post(url, json=body, params={"key": GEMINI_API_KEY})
+        if res.status_code == 200:
+            return res.json()["embedding"]["values"]
+        if res.status_code == 429:
+            time.sleep(2 ** attempt)
+            continue
+        res.raise_for_status()
     res.raise_for_status()
-    return res.json()["embedding"]["values"]
+    return []
 
 
 # --- Supabaseにドキュメントを保存 ---
