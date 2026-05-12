@@ -149,17 +149,22 @@ def save_document(source_type, source_id, title, content, author, recorded_at, u
 
 # --- Supabaseから検索 ---
 def search_documents(query_text, channel_names=None):
-    try:
-        query = supabase.table("documents").select("*")
-        if channel_names:
-            query = query.in_("channel_name", channel_names)
-        # テキスト検索
-        query = query.ilike("content", f"%{query_text}%")
-        result = query.limit(50).execute()
-        return result.data or []
-    except Exception as e:
-        st.warning(f"DB検索エラー: {e}")
-        return []
+      try:
+          query_embedding = genai.embed_content(
+              model="models/text-embedding-004",
+              content=query_text,
+              task_type="retrieval_query"
+          )['embedding']
+          result = supabase.rpc("match_documents", {
+              "query_embedding": query_embedding,
+              "match_threshold": 0.5,
+              "match_count": 20,
+              "filter_channels": channel_names or None,
+          }).execute()
+          return result.data or []
+      except Exception as e:
+          st.warning(f"DB検索エラー: {e}")
+          return []
 
 def get_teams_and_channels(token):
     items = []
