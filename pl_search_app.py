@@ -234,10 +234,8 @@ def index_channel(sel, token):
             name = user.get('displayName', '不明') if user else '不明'
             created = msg.get('createdDateTime', '')
             msg_id = msg.get('id', '')
-            teams_link = (
-                  f"https://teams.microsoft.com/l/message/{channel_id}/{msg_id}"
-                  f"?groupId={team_id}&tenantId={MS_TENANT_ID}"
-              )
+            teams_link =
+f"https://teams.microsoft.com/l/message/{channel_id}/{msg_id}?groupId={team_id}&tenantId={MS_TENANT_ID}"
             atts = msg.get('attachments', [])
             att_names = [a.get('name', '') for a in atts if a.get('name')]
             full_content = body
@@ -248,10 +246,8 @@ def index_channel(sel, token):
 team_name)
                 count += 1
 
-            reply_link = (
-                          f"https://teams.microsoft.com/l/message/{channel_id}/{reply_id}"
-                          f"?groupId={team_id}&tenantId={MS_TENANT_ID}"
-                      )
+            reply_url =
+f"https://graph.microsoft.com/v1.0/teams/{team_id}/channels/{channel_id}/messages/{msg_id}/replies?$top=20"
             reply_data = graph_get(reply_url, token)
             if reply_data:
                 for reply in reply_data.get('value', []):
