@@ -112,17 +112,21 @@ def extract_text_from_bytes(file_bytes_raw, file_name):
         text = f"(解析エラー: {e})"
     return text[:4000]
 
+# --- Supabaseにドキュメントを保存 ---
 def save_document(source_type, source_id, title, content, author, recorded_at, url, channel_name, team_name):
     if not content or not content.strip():
         return
     try:
+        # 既存チェック
         existing = supabase.table("documents").select("id").eq("source_id", source_id).execute()
         if existing.data:
+            # 更新
             supabase.table("documents").update({
                 "content": content,
                 "updated_at": datetime.now().isoformat(),
             }).eq("source_id", source_id).execute()
         else:
+            # 新規保存
             supabase.table("documents").insert({
                 "source_type": source_type,
                 "source_id": source_id,
@@ -137,48 +141,16 @@ def save_document(source_type, source_id, title, content, author, recorded_at, u
     except Exception as e:
         st.warning(f"DB保存エラー: {e}")
 
-WELFARE_SYNONYMS = {
-    "体調":         ["吐き気", "頭痛", "発熱", "体調不良", "しんどい", "具合", "疲れ", "痛み", "食欲", "だるい"],
-    "体調不良":     ["体調", "吐き気", "頭痛", "発熱", "しんどい", "具合", "疲れ"],
-    "吐き気":       ["体調", "体調不良", "しんどい", "具合"],
-    "頭痛":         ["体調", "体調不良", "しんどい", "痛み"],
-    "発熱":         ["体調", "体調不良", "熱", "病院"],
-    "疲れ":         ["体調", "しんどい", "疲労", "だるい"],
-    "パニック":     ["癇癪", "混乱", "興奮", "自傷", "他害", "落ち着かない"],
-    "癇癪":         ["パニック", "混乱", "興奮", "怒り"],
-    "自傷":         ["パニック", "癇癪", "不安", "他害"],
-    "こだわり":     ["強迫", "繰り返し", "確認"],
-    "不安":         ["緊張", "落ち着かない", "イライラ", "混乱", "怖い"],
-    "イライラ":     ["不安", "緊張", "怒り", "興奮"],
-    "落ち着かない": ["不安", "緊張", "パニック", "多動"],
-    "うつ":         ["意欲低下", "孤立", "不安"],
-    "欠席":         ["休み", "休んだ", "来なかった", "通所"],
-    "休み":         ["欠席", "休んだ", "来なかった"],
-}
-
-def expand_keywords(keyword):
-    expanded = {keyword}
-    for key, synonyms in WELFARE_SYNONYMS.items():
-        if key in keyword or keyword in key:
-            expanded.update(synonyms)
-    return list(expanded)
-
+# --- Supabaseから検索 ---
 def search_documents(query_text, channel_names=None):
     try:
-        expanded = expand_keywords(query_text)
-        all_results = []
-        seen_ids = set()
-        for kw in expanded:
-            query = supabase.table("documents").select("*")
-            if channel_names:
-                query = query.in_("channel_name", channel_names)
-            query = query.ilike("content", f"%{kw}%")
-            result = query.limit(20).execute()
-            for doc in (result.data or []):
-                if doc["id"] not in seen_ids:
-                    all_results.append(doc)
-                    seen_ids.add(doc["id"])
-        return all_results[:50]
+        query = supabase.table("documents").select("*")
+        if channel_names:
+            query = query.in_("channel_name", channel_names)
+        # テキスト検索
+        query = query.ilike("content", f"%{query_text}%")
+        result = query.limit(50).execute()
+        return result.data or []
     except Exception as e:
         st.warning(f"DB検索エラー: {e}")
         return []
@@ -218,12 +190,14 @@ def get_teams_and_channels(token):
     return items
 
 def index_channel(sel, token):
+    """チャンネルのデータをSupabaseにインデックス化"""
     team_id = sel['team_id']
     channel_id = sel['channel_id']
     team_name = sel.get('team_name', '')
     channel_name = sel.get('channel_name', '')
     count = 0
 
+    # メッセージ
     url = f"https://graph.microsoft.com/v1.0/teams/{team_id}/channels/{channel_id}/messages?$top=50"
     data = graph_get(url, token)
     if data:
@@ -234,21 +208,18 @@ def index_channel(sel, token):
             name = user.get('displayName', '不明') if user else '不明'
             created = msg.get('createdDateTime', '')
             msg_id = msg.get('id', '')
-            tl = "https://teams.microsoft.com/l/message/"
-            tl += channel_id + "/" + msg_id
-            tl += "?groupId=" + team_id + "&tenantId=" + MS_TENANT_ID
-            teams_link = tl
+            teams_link = f"https://teams.microsoft.com/l/message/{channel_id}/{msg_id}?groupId={team_id}&tenantId={MS_TENANT_ID}"
+            atts = msg.get('attachments', [])
             att_names = [a.get('name', '') for a in atts if a.get('name')]
             full_content = body
             if att_names:
                 full_content += f" [添付: {', '.join(att_names)}]"
             if full_content.strip():
-                save_document('message', msg_id, None, full_content, name, created, teams_link, channel_name,
-team_name)
+                save_document('message', msg_id, None, full_content, name, created, teams_link, channel_name, team_name)
                 count += 1
 
-            reply_url =
-f"https://graph.microsoft.com/v1.0/teams/{team_id}/channels/{channel_id}/messages/{msg_id}/replies?$top=20"
+            # 返信
+            reply_url = f"https://graph.microsoft.com/v1.0/teams/{team_id}/channels/{channel_id}/messages/{msg_id}/replies?$top=20"
             reply_data = graph_get(reply_url, token)
             if reply_data:
                 for reply in reply_data.get('value', []):
@@ -258,13 +229,12 @@ f"https://graph.microsoft.com/v1.0/teams/{team_id}/channels/{channel_id}/message
                     rname = ruser.get('displayName', '不明') if ruser else '不明'
                     rcreated = reply.get('createdDateTime', '')
                     reply_id = reply.get('id', '')
-                    reply_link =
-f"https://teams.microsoft.com/l/message/{channel_id}/{reply_id}?groupId={team_id}&tenantId={MS_TENANT_ID}"
+                    reply_link = f"https://teams.microsoft.com/l/message/{channel_id}/{reply_id}?groupId={team_id}&tenantId={MS_TENANT_ID}"
                     if rbody.strip():
-                        save_document('message', reply_id, None, rbody, rname, rcreated, reply_link, channel_name,
-team_name)
+                        save_document('message', reply_id, None, rbody, rname, rcreated, reply_link, channel_name, team_name)
                         count += 1
 
+    # ファイル
     folder_url = f"https://graph.microsoft.com/v1.0/teams/{team_id}/channels/{channel_id}/filesFolder"
     folder_data = graph_get(folder_url, token)
     if folder_data:
@@ -288,12 +258,11 @@ team_name)
                     if content:
                         text = extract_text_from_bytes(content, name)
                         if text:
-                            save_document('file', file_item_id, name, text, None, None, web_url, channel_name,
-team_name)
+                            save_document('file', file_item_id, name, text, None, None, web_url, channel_name, team_name)
                             count += 1
 
-    pages_url =
-f"https://graph.microsoft.com/v1.0/groups/{team_id}/onenote/pages?$top=50&$select=id,title,createdDateTime,links"
+    # OneNote
+    pages_url = f"https://graph.microsoft.com/v1.0/groups/{team_id}/onenote/pages?$top=50&$select=id,title,createdDateTime,links"
     pages_data = graph_get(pages_url, token)
     if pages_data:
         for page in pages_data.get('value', []):
@@ -308,8 +277,7 @@ f"https://graph.microsoft.com/v1.0/groups/{team_id}/onenote/pages?$top=50&$selec
             if res.status_code == 200:
                 body = strip_html(res.text)
                 if body.strip():
-                    save_document('onenote', page_id, title, body, None, created, one_note_url, channel_name,
-team_name)
+                    save_document('onenote', page_id, title, body, None, created, one_note_url, channel_name, team_name)
                     count += 1
 
     return count
@@ -367,6 +335,7 @@ if st.session_state.ms_token:
     if channels:
         labels = [ch['label'] for ch in channels]
 
+        # タブで「検索」と「インデックス更新」を切り替え
         tab1, tab2 = st.tabs(["🔍 検索", "🔄 インデックス更新"])
 
         with tab1:
@@ -390,16 +359,18 @@ if st.session_state.ms_token:
                     st.session_state.ai_answer = ""
                     st.session_state.evidence_links = []
 
+                    # 選択したチャンネル名一覧
                     selected_channel_names = [
                         channels[i].get('channel_name') for i in selected_indices
                         if channels[i].get('channel_name')
                     ]
 
                     with st.spinner("DBから検索中..."):
+                        # DBから検索（キーワードを複数に分割して検索）
                         keywords = question.replace('について', '').replace('の', ' ').split()
                         all_docs = []
                         seen_ids = set()
-                        for kw in keywords[:3]:
+                        for kw in keywords[:3]:  # 最大3キーワード
                             if len(kw) < 2:
                                 continue
                             docs = search_documents(kw, selected_channel_names)
@@ -411,6 +382,7 @@ if st.session_state.ms_token:
                     if not all_docs:
                         st.warning("DBにデータがありません。「インデックス更新」タブでデータを取り込んでください。")
                     else:
+                        # コンテキスト作成
                         all_context = []
                         all_links = []
                         for doc in all_docs:
@@ -424,8 +396,7 @@ if st.session_state.ms_token:
                             channel_name = doc.get('channel_name', '')
 
                             try:
-                                dt = datetime.fromisoformat(recorded_at.replace('Z', '+00:00')) if recorded_at else
-None
+                                dt = datetime.fromisoformat(recorded_at.replace('Z', '+00:00')) if recorded_at else None
                                 date_str = dt.strftime('%Y/%m/%d %H:%M') if dt else ''
                             except Exception:
                                 date_str = recorded_at
@@ -460,22 +431,16 @@ None
                         with st.spinner("🤖 AIが分析中..."):
                             model = get_working_model()
                             prompt = (
-
-f"あなたは福祉施設の支援記録を管理する社内アシスタントです。以下のデータを元に質問に答えてください。\n\n"
+                                f"あなたは福祉施設の支援記録を管理する社内アシスタントです。以下のデータを元に質問に答えてください。\n\n"
                                 f"【重要なルール】\n"
-
-f"・質問のキーワードだけでなく、福祉現場で関連するあらゆる言葉・状況を幅広く拾ってください\n"
+                                f"・質問のキーワードだけでなく、福祉現場で関連するあらゆる言葉・状況を幅広く拾ってください\n"
                                 f"・以下のカテゴリを横断的に検索してください：\n"
-                                f"
-【身体・体調】吐き気、頭痛、発熱、欠席、体調不良、病院、薬、しんどい、具合が悪い、疲れ、痛み、食欲\n"
-                                f"
-【特性・行動】強迫行動、こだわり、繰り返し、確認行動、パニック、癇癪、自傷、他害、多動\n"
-                                f"
-【感情・精神状態】不安、緊張、落ち着かない、イライラ、気分、うつ、意欲低下、孤立、混乱\n"
+                                f"  【身体・体調】吐き気、頭痛、発熱、欠席、体調不良、病院、薬、しんどい、具合が悪い、疲れ、痛み、食欲\n"
+                                f"  【特性・行動】強迫行動、こだわり、繰り返し、確認行動、パニック、癇癪、自傷、他害、多動\n"
+                                f"  【感情・精神状態】不安、緊張、落ち着かない、イライラ、気分、うつ、意欲低下、孤立、混乱\n"
                                 f"  【感覚過敏・苦手】音、光、においが苦手、触覚過敏、雷、人混み、外出しづらい\n"
                                 f"  【生活・就労】外出、通所、欠席、就労、求人、面接、作業、人間関係\n"
-
-f"・回答には必ず記録資料（いつ・誰が・どのOneNote/ファイル/メッセージ）のIDを含めてください\n"
+                                f"・回答には必ず記録資料（いつ・誰が・どのOneNote/ファイル/メッセージ）のIDを含めてください\n"
                                 f"・該当情報が複数あれば時系列で列挙してください\n"
                                 f"・直接的な言葉がなくても、文脈から関連すると判断できる情報も含めてください\n"
                                 f"・見つからない場合は「見つかりませんでした」と答えてください\n\n"
