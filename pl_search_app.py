@@ -111,7 +111,13 @@ def extract_text_from_bytes(file_bytes_raw, file_name):
     except Exception as e:
         text = f"(解析エラー: {e})"
     return text[:4000]
-
+def get_embedding(text):
+      result = genai.embed_content(
+          model="models/text-embedding-004",
+          content=text[:2000],
+          task_type="retrieval_document"
+      )
+      return result['embedding']
 # --- Supabaseにドキュメントを保存 ---
 def save_document(source_type, source_id, title, content, author, recorded_at, url, channel_name, team_name):
     if not content or not content.strip():
