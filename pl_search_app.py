@@ -50,7 +50,25 @@ def get_msal_app():
     return st.session_state.msal_app
 
 
+@st.cache_data(ttl=3600)
+def get_generate_model_name():
+    list_res = requests.get(
+        "https://generativelanguage.googleapis.com/v1beta/models",
+        params={"key": GEMINI_API_KEY}
+    )
+    if list_res.status_code == 200:
+        models = list_res.json().get("models", [])
+        for keyword in ["1.5-flash", "flash", "pro"]:
+            for m in models:
+                methods = m.get("supportedGenerationMethods", [])
+                if "generateContent" in methods and keyword in m["name"]:
+                    return m["name"].replace("models/", "")
+    return None
+
 def get_working_model():
+    name = get_generate_model_name()
+    if name:
+        return genai.GenerativeModel(name)
     return genai.GenerativeModel("gemini-1.5-flash")
 
 
