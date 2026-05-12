@@ -506,6 +506,11 @@ if st.session_state.ms_token:
                             except Exception:
                                 date_str = recorded_at
 
+                            source_id = str(source_id or '')
+                            title = str(title or '')
+                            author = str(author or '不明')
+                            content = str(content or '')
+                            date_str = str(date_str or '')
                             if source_type == 'message':
                                 entry = "[メッセージID:" + source_id + "] " + author + "（" + date_str + "）: " + content[:500]
                                 icon = "📝"
