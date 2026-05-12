@@ -123,12 +123,18 @@ def extract_text_from_bytes(file_bytes_raw, file_name):
 
 
 def get_embedding(text):
-    result = genai.embed_content(
-        model="models/embedding-001",
-        content=text[:2000],
-        task_type="retrieval_document"
+    url = (
+        "https://generativelanguage.googleapis.com/v1/models/"
+        "text-embedding-004:embedContent"
     )
-    return result['embedding']
+    body = {
+        "model": "models/text-embedding-004",
+        "content": {"parts": [{"text": text[:2000]}]},
+        "taskType": "RETRIEVAL_DOCUMENT"
+    }
+    res = requests.post(url, json=body, params={"key": GEMINI_API_KEY})
+    res.raise_for_status()
+    return res.json()["embedding"]["values"]
 
 
 # --- Supabaseにドキュメントを保存 ---
@@ -164,11 +170,18 @@ def save_document(source_type, source_id, title, content, author, recorded_at, u
 # --- Supabaseからベクトル検索 ---
 def search_documents(query_text, channel_names=None):
     try:
-        query_embedding = genai.embed_content(
-            model="models/embedding-001",
-            content=query_text,
-            task_type="retrieval_query"
-        )['embedding']
+        embed_url = (
+            "https://generativelanguage.googleapis.com/v1/models/"
+            "text-embedding-004:embedContent"
+        )
+        embed_body = {
+            "model": "models/text-embedding-004",
+            "content": {"parts": [{"text": query_text}]},
+            "taskType": "RETRIEVAL_QUERY"
+        }
+        embed_res = requests.post(embed_url, json=embed_body, params={"key": GEMINI_API_KEY})
+        embed_res.raise_for_status()
+        query_embedding = embed_res.json()["embedding"]["values"]
         result = supabase.rpc("match_documents", {
             "query_embedding": query_embedding,
             "match_threshold": 0.5,
