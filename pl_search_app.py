@@ -233,8 +233,13 @@ def index_channel(sel, token):
 team_name)
               count += 1
 
-          reply_url =
-f"https://graph.microsoft.com/v1.0/teams/{team_id}/channels/{channel_id}/messages/{msg_id}/replies?$top=20"
+          reply_url = (
+              "https://graph.microsoft.com/v1.0/teams/"
+              + team_id
+              + "/channels/" + channel_id
+              + "/messages/" + msg_id
+              + "/replies?$top=20"
+          )
           reply_data = graph_get(reply_url, token)
           if reply_data:
               for reply in reply_data.get('value', []):
