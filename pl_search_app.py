@@ -141,19 +141,54 @@ def save_document(source_type, source_id, title, content, author, recorded_at, u
     except Exception as e:
         st.warning(f"DB保存エラー: {e}")
 
+  # 福祉用関連語辞書
+  WELFARE_SYNONYMS = {
+      "体調":     ["吐き気", "頭痛", "発熱", "体調不良", "しんどい", "具合", "疲れ", "痛み", "食欲", "だるい"],
+      "体調不良": ["体調", "吐き気", "頭痛", "発熱", "しんどい", "具合", "疲れ"],
+      "吐き気":   ["体調", "体調不良", "しんどい", "具合"],
+      "頭痛":     ["体調", "体調不良", "しんどい", "痛み"],
+      "発熱":     ["体調", "体調不良", "熱", "病院"],
+      "疲れ":     ["体調", "しんどい", "疲労", "だるい"],
+      "パニック": ["癇癪", "混乱", "興奮", "自傷", "他害", "落ち着かない"],
+      "癇癪":     ["パニック", "混乱", "興奮", "怒り"],
+      "自傷":     ["パニック", "癇癪", "不安", "他害"],
+      "こだわり": ["強迫", "繰り返し", "確認"],
+      "不安":     ["緊張", "落ち着かない", "イライラ", "混乱", "怖い"],
+      "イライラ": ["不安", "緊張", "怒り", "興奮"],
+      "落ち着かない": ["不安", "緊張", "パニック", "多動"],
+      "うつ":     ["意欲低下", "孤立", "不安"],
+      "欠席":     ["休み", "休んだ", "来なかった", "通所"],
+      "休み":     ["欠席", "休んだ", "来なかった"],
+  }
+
+  def expand_keywords(keyword):
+      expanded = {keyword}
+      for key, synonyms in WELFARE_SYNONYMS.items():
+          if key in keyword or keyword in key:
+              expanded.update(synonyms)
+      return list(expanded)
+
+          
 # --- Supabaseから検索 ---
-def search_documents(query_text, channel_names=None):
-    try:
-        query = supabase.table("documents").select("*")
-        if channel_names:
-            query = query.in_("channel_name", channel_names)
-        # テキスト検索
-        query = query.ilike("content", f"%{query_text}%")
-        result = query.limit(50).execute()
-        return result.data or []
-    except Exception as e:
-        st.warning(f"DB検索エラー: {e}")
-        return []
+ def search_documents(query_text, channel_names=None):
+      try:
+          expanded = expand_keywords(query_text)
+          all_results = []
+          seen_ids = set()
+          for kw in expanded:
+              query = supabase.table("documents").select("*")
+              if channel_names:
+                  query = query.in_("channel_name", channel_names)
+              query = query.ilike("content", f"%{kw}%")
+              result = query.limit(20).execute()
+              for doc in (result.data or []):
+                  if doc["id"] not in seen_ids:
+                      all_results.append(doc)
+                      seen_ids.add(doc["id"])
+          return all_results[:50]
+      except Exception as e:
+          st.warning(f"DB検索エラー: {e}")
+          return []
 
 def get_teams_and_channels(token):
     items = []
