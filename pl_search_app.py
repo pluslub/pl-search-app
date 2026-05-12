@@ -141,7 +141,7 @@ def save_document(source_type, source_id, title, content, author, recorded_at, u
     except Exception as e:
         st.warning(f"DB保存エラー: {e}")
 
-  # 福祉用関連語辞書
+# 福祉用関連語辞書
   WELFARE_SYNONYMS = {
       "体調":     ["吐き気", "頭痛", "発熱", "体調不良", "しんどい", "具合", "疲れ", "痛み", "食欲", "だるい"],
       "体調不良": ["体調", "吐き気", "頭痛", "発熱", "しんどい", "具合", "疲れ"],
@@ -167,8 +167,6 @@ def save_document(source_type, source_id, title, content, author, recorded_at, u
           if key in keyword or keyword in key:
               expanded.update(synonyms)
       return list(expanded)
-
-          
 # --- Supabaseから検索 ---
  def search_documents(query_text, channel_names=None):
       try:
