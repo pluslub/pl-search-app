@@ -235,9 +235,9 @@ def index_channel(sel, token):
             created = msg.get('createdDateTime', '')
             msg_id = msg.get('id', '')
             tl = "https://teams.microsoft.com/l/message/"
-              tl += channel_id + "/" + msg_id
-              tl += "?groupId=" + team_id + "&tenantId=" + MS_TENANT_ID
-              teams_link = tl
+            tl += channel_id + "/" + msg_id
+            tl += "?groupId=" + team_id + "&tenantId=" + MS_TENANT_ID
+            teams_link = tl
             att_names = [a.get('name', '') for a in atts if a.get('name')]
             full_content = body
             if att_names:
