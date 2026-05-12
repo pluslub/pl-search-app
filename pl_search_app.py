@@ -231,8 +231,8 @@ def search_documents(query_text, channel_names=None):
         query_embedding = embed_res.json()["embedding"]["values"]
         result = supabase.rpc("match_documents", {
             "query_embedding": query_embedding,
-            "match_threshold": 0.5,
-            "match_count": 20,
+            "match_threshold": 0.3,
+            "match_count": 30,
             "filter_channels": channel_names or None,
         }).execute()
         return result.data or []
@@ -345,6 +345,40 @@ def index_channel(sel, token):
                         )
                         count += 1
 
+    def index_folder(drive_id, item_id):
+        nonlocal count
+        children_url = (
+            "https://graph.microsoft.com/v1.0/drives/"
+            + drive_id + "/items/" + item_id + "/children?$top=50"
+        )
+        while children_url:
+            children_data = graph_get(children_url, token)
+            if not children_data:
+                break
+            children_url = children_data.get('@odata.nextLink')
+            for item in children_data.get('value', []):
+                if 'folder' in item:
+                    index_folder(drive_id, item['id'])
+                    continue
+                if 'file' not in item:
+                    continue
+                name = item['name']
+                web_url = item.get('webUrl', '')
+                file_item_id = item['id']
+                file_drive_id = item.get('parentReference', {}).get('driveId', drive_id)
+                supported = ('.xlsx', '.xlsm', '.docx', '.txt', '.pdf')
+                if not name.endswith(supported):
+                    continue
+                content = download_file_content(file_drive_id, file_item_id, token)
+                if content:
+                    text = extract_text_from_bytes(content, name)
+                    if text:
+                        save_document(
+                            'file', file_item_id, name, text,
+                            None, None, web_url, channel_name, team_name
+                        )
+                        count += 1
+
     folder_url = (
         "https://graph.microsoft.com/v1.0/teams/"
         + team_id + "/channels/" + channel_id + "/filesFolder"
@@ -354,31 +388,7 @@ def index_channel(sel, token):
         drive_id = folder_data.get('parentReference', {}).get('driveId')
         item_id = folder_data.get('id')
         if drive_id and item_id:
-            children_url = (
-                "https://graph.microsoft.com/v1.0/drives/"
-                + drive_id + "/items/" + item_id + "/children?$top=50"
-            )
-            children_data = graph_get(children_url, token)
-            if children_data:
-                for item in children_data.get('value', []):
-                    if 'file' not in item:
-                        continue
-                    name = item['name']
-                    web_url = item.get('webUrl', '')
-                    file_item_id = item['id']
-                    file_drive_id = item.get('parentReference', {}).get('driveId', drive_id)
-                    supported = ('.xlsx', '.xlsm', '.docx', '.txt', '.pdf')
-                    if not name.endswith(supported):
-                        continue
-                    content = download_file_content(file_drive_id, file_item_id, token)
-                    if content:
-                        text = extract_text_from_bytes(content, name)
-                        if text:
-                            save_document(
-                                'file', file_item_id, name, text,
-                                None, None, web_url, channel_name, team_name
-                            )
-                            count += 1
+            index_folder(drive_id, item_id)
 
     pages_url = (
         "https://graph.microsoft.com/v1.0/groups/"
