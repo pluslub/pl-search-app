@@ -51,19 +51,7 @@ def get_msal_app():
 
 
 def get_working_model():
-    try:
-        available_models = [
-            m.name for m in genai.list_models()
-            if 'generateContent' in m.supported_generation_methods
-        ]
-        target = next((m for m in available_models if "1.5-flash" in m), None)
-        if not target:
-            target = next((m for m in available_models if "flash" in m), None)
-        if not target:
-            target = available_models[0] if available_models else "gemini-1.5-flash"
-        return genai.GenerativeModel(target)
-    except Exception:
-        return genai.GenerativeModel("gemini-1.5-flash")
+    return genai.GenerativeModel("gemini-1.5-flash")
 
 
 def graph_get(url, token):
@@ -556,11 +544,18 @@ if st.session_state.ms_token:
                                 "【質問】\n" + question + "\n\n"
                                 "【データ】\n" + context_text
                             )
-                            try:
-                                ai_res = model.generate_content(prompt)
-                                st.session_state.ai_answer = ai_res.text.strip()
-                            except Exception as e:
-                                st.error("AI分析エラー: " + str(e))
+                            import time
+                            for attempt in range(5):
+                                try:
+                                    ai_res = model.generate_content(prompt)
+                                    st.session_state.ai_answer = ai_res.text.strip()
+                                    break
+                                except Exception as e:
+                                    if "429" in str(e) and attempt < 4:
+                                        time.sleep(2 ** attempt * 10)
+                                        continue
+                                    st.error("AI分析エラー: " + str(e))
+                                    break
 
             if st.session_state.ai_answer:
                 st.header("📊 AIの回答")
