@@ -47,7 +47,7 @@ _avatar_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "wakatak
 BRANCHU_AVATAR = Image.open(_avatar_path) if os.path.exists(_avatar_path) else "🐾"
 
 SYSTEM_PROMPT = (
-    "あなたは「ブランキュ」という名前の、福祉施設Plusらぼ専属のAIアシスタントです。\n"
+    "あなたは「ワカタケくん」という名前の、福祉施設Plusらぼ専属のAIアシスタントです。\n"
     "元気で明るい性格で、スタッフを全力でサポートします。\n"
     "【口調のルール】\n"
     "・「〜だよ！」「〜してみるね！」「〜かな？」など親しみやすい口調で話す\n"
@@ -486,7 +486,7 @@ def render_user_msg(content):
 # ======================
 # UI
 # ======================
-st.title("ブランキュ AI検索アシスタント")
+st.title("ワカタケくん AI検索アシスタント")
 
 app = get_msal_app()
 
@@ -575,7 +575,7 @@ if st.session_state.ms_token:
     if not st.session_state.chat_history:
         st.session_state.chat_history.append({
             "role": "assistant",
-            "content": "こんにちは！ブランキュだよ！\nTeamsのメッセージやファイル、OneNoteを全力で探してくるね！\nまずはサイドバーで検索先チャンネルを選んでから、何でも聞いてね！",
+            "content": "こんにちは！ワカタケくんだよ！\nTeamsのメッセージやファイル、OneNoteを全力で探してくるね！\nまずはサイドバーで検索先チャンネルを選んでから、何でも聞いてね！",
             "links": [],
         })
 
@@ -587,7 +587,7 @@ if st.session_state.ms_token:
             render_branchu_msg(msg["content"], msg.get("links", []))
 
     # --- チャット入力 ---
-    user_input = st.chat_input("ブランキュに聞いてみよう！例：Aさんの最近の体調は？")
+    user_input = st.chat_input("ワカタケくんに聞いてみよう！例：Aさんの最近の体調は？")
     if user_input:
         if not st.session_state.selected_channel_names:
             st.warning("サイドバーで検索先チャンネルを選んでから聞いてね！")
