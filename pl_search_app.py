@@ -602,75 +602,75 @@ if st.session_state.ms_token:
                 response = "ごめんね、DBにデータが見つからなかった…「インデックス更新」でデータを取り込んでみて！"
                 render_branchu_msg(response)
                 st.session_state.chat_history.append({"role": "assistant", "content": response, "links": []})
-                else:
-                    all_context = []
-                    all_links = []
-                    for doc in all_docs:
-                        source_type = doc.get('source_type', '')
-                        source_id = str(doc.get('source_id', '') or '')
-                        title = str(doc.get('title', '') or '')
-                        content = str(doc.get('content', '') or '')
-                        author = str(doc.get('author', '不明') or '不明')
-                        recorded_at = doc.get('recorded_at', '')
-                        url = doc.get('url', '')
+            else:
+                all_context = []
+                all_links = []
+                for doc in all_docs:
+                    source_type = doc.get('source_type', '')
+                    source_id = str(doc.get('source_id', '') or '')
+                    title = str(doc.get('title', '') or '')
+                    content = str(doc.get('content', '') or '')
+                    author = str(doc.get('author', '不明') or '不明')
+                    recorded_at = doc.get('recorded_at', '')
+                    url = doc.get('url', '')
 
+                    try:
+                        dt = datetime.fromisoformat(recorded_at.replace('Z', '+00:00')) if recorded_at else None
+                        date_str = dt.strftime('%Y/%m/%d %H:%M') if dt else ''
+                    except Exception:
+                        date_str = str(recorded_at or '')
+
+                    if source_type == 'message':
+                        entry = "[メッセージID:" + source_id + "] " + author + "（" + date_str + "）: " + content[:500]
+                        icon, lbl = "📝", author + "（" + date_str + "）"
+                    elif source_type == 'file':
+                        entry = "[ファイルID:" + source_id + "] ファイル: " + title + ":\n" + content[:1000]
+                        icon, lbl = "📄", title or source_id
+                    else:
+                        entry = "[OneNoteID:" + source_id + "] OneNote: " + title + "（" + date_str + "）:\n" + content[:2000]
+                        icon, lbl = "📓", title + "（" + date_str + "）"
+
+                    all_context.append(entry)
+                    all_links.append({"id": source_id, "type": source_type, "label": icon + " " + lbl, "url": url})
+
+                context_text = "\n".join(all_context)
+                if len(context_text) > 50000:
+                    context_text = context_text[:50000]
+
+                history_text = ""
+                for h in st.session_state.chat_history[-7:-1]:
+                    role_label = "ユーザー" if h["role"] == "user" else "ブランキュ"
+                    history_text += role_label + ": " + h["content"][:300] + "\n"
+
+                ai_prompt = (
+                    SYSTEM_PROMPT + "\n\n"
+                    + ("【これまでの会話】\n" + history_text + "\n" if history_text else "")
+                    + "【今回の質問】\n" + user_input + "\n\n"
+                    + "【関連データ】\n" + context_text
+                )
+
+                import time
+                response = ""
+                model = get_working_model()
+                with st.spinner("ブランキュが考えてるよ..."):
+                    for attempt in range(5):
                         try:
-                            dt = datetime.fromisoformat(recorded_at.replace('Z', '+00:00')) if recorded_at else None
-                            date_str = dt.strftime('%Y/%m/%d %H:%M') if dt else ''
-                        except Exception:
-                            date_str = str(recorded_at or '')
+                            ai_res = model.generate_content(ai_prompt)
+                            response = ai_res.text.strip()
+                            break
+                        except Exception as e:
+                            if "429" in str(e) and attempt < 4:
+                                time.sleep(2 ** attempt * 10)
+                                continue
+                            response = "AI分析エラー: " + str(e)
+                            break
 
-                        if source_type == 'message':
-                            entry = "[メッセージID:" + source_id + "] " + author + "（" + date_str + "）: " + content[:500]
-                            icon, lbl = "📝", author + "（" + date_str + "）"
-                        elif source_type == 'file':
-                            entry = "[ファイルID:" + source_id + "] ファイル: " + title + ":\n" + content[:1000]
-                            icon, lbl = "📄", title or source_id
-                        else:
-                            entry = "[OneNoteID:" + source_id + "] OneNote: " + title + "（" + date_str + "）:\n" + content[:2000]
-                            icon, lbl = "📓", title + "（" + date_str + "）"
+                shown_links = [lnk for lnk in all_links if lnk["id"] in response and lnk["url"]]
+                display_links = shown_links if shown_links else [lnk for lnk in all_links[:20] if lnk["url"]]
+                render_branchu_msg(response, display_links)
 
-                        all_context.append(entry)
-                        all_links.append({"id": source_id, "type": source_type, "label": icon + " " + lbl, "url": url})
-
-                    context_text = "\n".join(all_context)
-                    if len(context_text) > 50000:
-                        context_text = context_text[:50000]
-
-                    history_text = ""
-                    for h in st.session_state.chat_history[-7:-1]:
-                        role_label = "ユーザー" if h["role"] == "user" else "ブランキュ"
-                        history_text += role_label + ": " + h["content"][:300] + "\n"
-
-                    ai_prompt = (
-                        SYSTEM_PROMPT + "\n\n"
-                        + ("【これまでの会話】\n" + history_text + "\n" if history_text else "")
-                        + "【今回の質問】\n" + user_input + "\n\n"
-                        + "【関連データ】\n" + context_text
-                    )
-
-                    import time
-                    response = ""
-                    model = get_working_model()
-                    with st.spinner("ブランキュが考えてるよ..."):
-                        for attempt in range(5):
-                            try:
-                                ai_res = model.generate_content(ai_prompt)
-                                response = ai_res.text.strip()
-                                break
-                            except Exception as e:
-                                if "429" in str(e) and attempt < 4:
-                                    time.sleep(2 ** attempt * 10)
-                                    continue
-                                response = "AI分析エラー: " + str(e)
-                                break
-
-                    shown_links = [lnk for lnk in all_links if lnk["id"] in response and lnk["url"]]
-                    display_links = shown_links if shown_links else [lnk for lnk in all_links[:20] if lnk["url"]]
-                    render_branchu_msg(response, display_links)
-
-                    st.session_state.chat_history.append({
-                        "role": "assistant",
-                        "content": response,
-                        "links": display_links,
-                    })
+                st.session_state.chat_history.append({
+                    "role": "assistant",
+                    "content": response,
+                    "links": display_links,
+                })
