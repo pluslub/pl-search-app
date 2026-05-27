@@ -1,10 +1,12 @@
 import io
+import os
 import msal
 import requests
 import streamlit as st
 import google.generativeai as genai
 from docx import Document
 from datetime import datetime, timedelta
+from PIL import Image
 import openpyxl
 import re
 from supabase import create_client
@@ -33,12 +35,29 @@ defaults = {
     "device_flow": None,
     "msal_app": None,
     "channels_list": None,
-    "ai_answer": "",
-    "evidence_links": [],
+    "chat_history": [],
+    "selected_channel_names": [],
 }
 for key, val in defaults.items():
     if key not in st.session_state:
         st.session_state[key] = val
+
+_avatar_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "ブランキュ.png")
+BRANCHU_AVATAR = Image.open(_avatar_path) if os.path.exists(_avatar_path) else "🐾"
+
+SYSTEM_PROMPT = (
+    "あなたは「ブランキュ」という名前の、福祉施設Plusらぼ専属のAIアシスタントです。\n"
+    "元気で明るい性格で、スタッフを全力でサポートします。\n"
+    "【口調のルール】\n"
+    "・「〜だよ！」「〜してみるね！」「〜かな？」など親しみやすい口調で話す\n"
+    "・情報を見つけたときは「あったよ！」「みつけた！」など元気に反応する\n"
+    "・見つからないときも「ごめんね、見つからなかった…でも別のキーワードで試してみて！」など前向きに\n"
+    "【回答のルール】\n"
+    "・回答には必ず記録資料（いつ・誰が・どのOneNote/ファイル/メッセージ）のIDを含める\n"
+    "・該当情報が複数あれば時系列で列挙する\n"
+    "・福祉現場の用語や状況を幅広く理解して回答する\n"
+    "・直接的な言葉がなくても文脈から関連すると判断できる情報も含める"
+)
 
 
 def get_msal_app():
@@ -424,21 +443,13 @@ def index_channel(sel, token):
 # ======================
 # UI
 # ======================
-st.title("🔍 Plusらぼ AI検索アシスタント")
-st.caption("メッセージ・ファイル・OneNote・PDFを横断検索し、AIが関連情報をまとめて回答します")
+st.title("ブランキュ AI検索アシスタント")
 
 app = get_msal_app()
 
-if st.session_state.ms_token:
-    st.success("✅ ログイン済み")
-    col1, col2 = st.columns([6, 1])
-    with col2:
-        if st.button("ログアウト"):
-            for key in defaults:
-                st.session_state[key] = defaults[key]
-            st.rerun()
-
+# --- ログインUI ---
 if not st.session_state.ms_token:
+    st.caption("メッセージ・ファイル・OneNote・PDFを横断検索するよ！まずはログインしてね！")
     if st.session_state.device_flow is None:
         if st.button("Microsoft 365 でログイン"):
             flow = app.initiate_device_flow(scopes=SCOPES)
@@ -462,6 +473,7 @@ if not st.session_state.ms_token:
                     st.error("❌ 認証に失敗しました。")
                     st.session_state.device_flow = None
 
+# --- ログイン後 ---
 if st.session_state.ms_token:
     token = st.session_state.ms_token
 
@@ -469,160 +481,163 @@ if st.session_state.ms_token:
         with st.spinner("Teams・チャット一覧を取得中..."):
             st.session_state.channels_list = get_teams_and_channels(token)
 
-    channels = st.session_state.channels_list
+    channels = st.session_state.channels_list or []
+    labels = [ch['label'] for ch in channels]
 
-    if channels:
-        labels = [ch['label'] for ch in channels]
+    # --- サイドバー ---
+    with st.sidebar:
+        st.success("✅ ログイン済み")
+        if st.button("ログアウト"):
+            for key in defaults:
+                st.session_state[key] = defaults[key]
+            st.rerun()
 
-        tab1, tab2 = st.tabs(["🔍 検索", "🔄 インデックス更新"])
+        st.divider()
+        st.header("📂 検索先チャンネル")
+        selected_indices = st.multiselect(
+            "チャンネルを選んでね（複数OK）",
+            range(len(labels)),
+            format_func=lambda i: labels[i],
+        )
+        st.session_state.selected_channel_names = [
+            channels[i].get('channel_name') for i in selected_indices
+            if channels[i].get('channel_name')
+        ]
 
-        with tab1:
-            selected_indices = st.multiselect(
-                "📂 検索先を選んでください（複数選択可）",
-                range(len(labels)),
-                format_func=lambda i: labels[i],
-            )
+        st.divider()
+        st.header("🔄 インデックス更新")
+        st.caption("新しい記録が増えたときに実行してね")
+        index_indices = st.multiselect(
+            "取り込むチャンネルを選んでね",
+            range(len(labels)),
+            format_func=lambda i: labels[i],
+            key="index_select"
+        )
+        if st.button("🔄 インデックス更新を実行"):
+            if not index_indices:
+                st.warning("チャンネルを選んでください。")
+            else:
+                total_count = 0
+                for sel_i in index_indices:
+                    sel = channels[sel_i]
+                    if sel['type'] != 'channel':
+                        continue
+                    with st.spinner(sel['label'] + " を取り込み中..."):
+                        count = index_channel(sel, token)
+                        total_count += count
+                        st.write("✅ " + sel['label'] + ": " + str(count) + " 件")
+                st.success("🎉 合計 " + str(total_count) + " 件保存したよ！")
 
-            question = st.text_input(
-                "💬 質問を入力してください",
-                placeholder="例：Aさんの体調変化について"
-            )
+    # --- 初回あいさつ ---
+    if not st.session_state.chat_history:
+        st.session_state.chat_history.append({
+            "role": "assistant",
+            "content": "こんにちは！ブランキュだよ！\nTeamsのメッセージやファイル、OneNoteを全力で探してくるね！\nまずはサイドバーで検索先チャンネルを選んでから、何でも聞いてね！",
+            "links": [],
+        })
 
-            if st.button("🚀 AIに聞く"):
-                if not selected_indices:
-                    st.warning("検索先を選んでください。")
-                elif not question:
-                    st.warning("質問を入力してください。")
+    # --- 会話履歴表示 ---
+    for msg in st.session_state.chat_history:
+        if msg["role"] == "user":
+            with st.chat_message("user"):
+                st.markdown(msg["content"])
+        else:
+            with st.chat_message("assistant", avatar=BRANCHU_AVATAR):
+                st.markdown(msg["content"])
+                for link in msg.get("links", []):
+                    if link.get("url"):
+                        st.markdown("[" + link["label"] + "](" + link["url"] + ")")
+
+    # --- チャット入力 ---
+    user_input = st.chat_input("ブランキュに聞いてみよう！例：Aさんの最近の体調は？")
+    if user_input:
+        if not st.session_state.selected_channel_names:
+            st.warning("サイドバーで検索先チャンネルを選んでから聞いてね！")
+        else:
+            st.session_state.chat_history.append({"role": "user", "content": user_input, "links": []})
+            with st.chat_message("user"):
+                st.markdown(user_input)
+
+            with st.chat_message("assistant", avatar=BRANCHU_AVATAR):
+                with st.spinner("探してるよ〜！"):
+                    all_docs = search_documents(user_input, st.session_state.selected_channel_names)
+
+                if not all_docs:
+                    response = "ごめんね、DBにデータが見つからなかった…「インデックス更新」でデータを取り込んでみて！"
+                    st.markdown(response)
+                    st.session_state.chat_history.append({"role": "assistant", "content": response, "links": []})
                 else:
-                    st.session_state.ai_answer = ""
-                    st.session_state.evidence_links = []
+                    all_context = []
+                    all_links = []
+                    for doc in all_docs:
+                        source_type = doc.get('source_type', '')
+                        source_id = str(doc.get('source_id', '') or '')
+                        title = str(doc.get('title', '') or '')
+                        content = str(doc.get('content', '') or '')
+                        author = str(doc.get('author', '不明') or '不明')
+                        recorded_at = doc.get('recorded_at', '')
+                        url = doc.get('url', '')
 
-                    selected_channel_names = [
-                        channels[i].get('channel_name') for i in selected_indices
-                        if channels[i].get('channel_name')
-                    ]
+                        try:
+                            dt = datetime.fromisoformat(recorded_at.replace('Z', '+00:00')) if recorded_at else None
+                            date_str = dt.strftime('%Y/%m/%d %H:%M') if dt else ''
+                        except Exception:
+                            date_str = str(recorded_at or '')
 
-                    with st.spinner("DBから検索中..."):
-                        all_docs = search_documents(question, selected_channel_names)
+                        if source_type == 'message':
+                            entry = "[メッセージID:" + source_id + "] " + author + "（" + date_str + "）: " + content[:500]
+                            icon, lbl = "📝", author + "（" + date_str + "）"
+                        elif source_type == 'file':
+                            entry = "[ファイルID:" + source_id + "] ファイル: " + title + ":\n" + content[:1000]
+                            icon, lbl = "📄", title or source_id
+                        else:
+                            entry = "[OneNoteID:" + source_id + "] OneNote: " + title + "（" + date_str + "）:\n" + content[:2000]
+                            icon, lbl = "📓", title + "（" + date_str + "）"
 
-                    if not all_docs:
-                        st.warning("DBにデータがありません。「インデックス更新」タブでデータを取り込んでください。")
-                    else:
-                        all_context = []
-                        all_links = []
-                        for doc in all_docs:
-                            source_type = doc.get('source_type', '')
-                            source_id = doc.get('source_id', '')
-                            title = doc.get('title', '')
-                            content = doc.get('content', '')
-                            author = doc.get('author', '不明')
-                            recorded_at = doc.get('recorded_at', '')
-                            url = doc.get('url', '')
+                        all_context.append(entry)
+                        all_links.append({"id": source_id, "type": source_type, "label": icon + " " + lbl, "url": url})
 
+                    context_text = "\n".join(all_context)
+                    if len(context_text) > 50000:
+                        context_text = context_text[:50000]
+
+                    history_text = ""
+                    for h in st.session_state.chat_history[-7:-1]:
+                        role_label = "ユーザー" if h["role"] == "user" else "ブランキュ"
+                        history_text += role_label + ": " + h["content"][:300] + "\n"
+
+                    ai_prompt = (
+                        SYSTEM_PROMPT + "\n\n"
+                        + ("【これまでの会話】\n" + history_text + "\n" if history_text else "")
+                        + "【今回の質問】\n" + user_input + "\n\n"
+                        + "【関連データ】\n" + context_text
+                    )
+
+                    import time
+                    response = ""
+                    model = get_working_model()
+                    with st.spinner("ブランキュが考えてるよ..."):
+                        for attempt in range(5):
                             try:
-                                dt = None
-                                if recorded_at:
-                                    dt = datetime.fromisoformat(recorded_at.replace('Z', '+00:00'))
-                                date_str = dt.strftime('%Y/%m/%d %H:%M') if dt else ''
-                            except Exception:
-                                date_str = recorded_at
+                                ai_res = model.generate_content(ai_prompt)
+                                response = ai_res.text.strip()
+                                break
+                            except Exception as e:
+                                if "429" in str(e) and attempt < 4:
+                                    time.sleep(2 ** attempt * 10)
+                                    continue
+                                response = "AI分析エラー: " + str(e)
+                                break
 
-                            source_id = str(source_id or '')
-                            title = str(title or '')
-                            author = str(author or '不明')
-                            content = str(content or '')
-                            date_str = str(date_str or '')
-                            if source_type == 'message':
-                                entry = "[メッセージID:" + source_id + "] " + author + "（" + date_str + "）: " + content[:500]
-                                icon = "📝"
-                                label = author + "（" + date_str + "）"
-                            elif source_type == 'file':
-                                entry = "[ファイルID:" + source_id + "] ファイル: " + title + ":\n" + content[:1000]
-                                icon = "📄"
-                                label = title or source_id
-                            else:
-                                entry = "[OneNoteID:" + source_id + "] OneNote: " + title + "（" + date_str + "）:\n" + content[:2000]
-                                icon = "📓"
-                                label = title + "（" + date_str + "）"
+                    st.markdown(response)
 
-                            all_context.append(entry)
-                            all_links.append({
-                                'id': source_id,
-                                'type': source_type,
-                                'label': icon + " " + label,
-                                'url': url,
-                            })
-
-                        st.session_state.evidence_links = all_links
-
-                        context_text = "\n".join(all_context)
-                        if len(context_text) > 50000:
-                            context_text = context_text[:50000]
-
-                        with st.spinner("🤖 AIが分析中..."):
-                            model = get_working_model()
-                            prompt = (
-                                "あなたは福祉施設の支援記録を管理する社内アシスタントです。"
-                                "以下のデータを元に質問に答えてください。\n\n"
-                                "【重要なルール】\n"
-                                "・質問のキーワードだけでなく、福祉現場で関連するあらゆる言葉・状況を幅広く拾ってください\n"
-                                "・回答には必ず記録資料（いつ・誰が・どのOneNote/ファイル/メッセージ）のIDを含めてください\n"
-                                "・該当情報が複数あれば時系列で列挙してください\n"
-                                "・見つからない場合は「見つかりませんでした」と答えてください\n\n"
-                                "【質問】\n" + question + "\n\n"
-                                "【データ】\n" + context_text
-                            )
-                            import time
-                            for attempt in range(5):
-                                try:
-                                    ai_res = model.generate_content(prompt)
-                                    st.session_state.ai_answer = ai_res.text.strip()
-                                    break
-                                except Exception as e:
-                                    if "429" in str(e) and attempt < 4:
-                                        time.sleep(2 ** attempt * 10)
-                                        continue
-                                    st.error("AI分析エラー: " + str(e))
-                                    break
-
-            if st.session_state.ai_answer:
-                st.header("📊 AIの回答")
-                st.markdown(st.session_state.ai_answer)
-
-                if st.session_state.evidence_links:
-                    st.header("🔗 記録資料一覧")
-                    answer_text = st.session_state.ai_answer
-                    shown_links = [
-                        link for link in st.session_state.evidence_links
-                        if link['id'] in answer_text and link['url']
-                    ]
-                    display_links = shown_links if shown_links else [
-                        lnk for lnk in st.session_state.evidence_links[:20] if lnk['url']
-                    ]
+                    shown_links = [lnk for lnk in all_links if lnk["id"] in response and lnk["url"]]
+                    display_links = shown_links if shown_links else [lnk for lnk in all_links[:20] if lnk["url"]]
                     for link in display_links:
-                        st.markdown("[" + link['label'] + "](" + link['url'] + ")")
+                        st.markdown("[" + link["label"] + "](" + link["url"] + ")")
 
-        with tab2:
-            st.write("選択したチャンネルのデータをDBに取り込みます。初回や新しい記録が増えたときに実行してください。")
-
-            index_indices = st.multiselect(
-                "📂 インデックス化するチャンネルを選んでください",
-                range(len(labels)),
-                format_func=lambda i: labels[i],
-                key="index_select"
-            )
-
-            if st.button("🔄 インデックス更新を実行"):
-                if not index_indices:
-                    st.warning("チャンネルを選んでください。")
-                else:
-                    total_count = 0
-                    for sel_i in index_indices:
-                        sel = channels[sel_i]
-                        if sel['type'] != 'channel':
-                            continue
-                        with st.spinner(sel['label'] + " を取り込み中..."):
-                            count = index_channel(sel, token)
-                            total_count += count
-                            st.write("✅ " + sel['label'] + ": " + str(count) + " 件保存しました")
-                    st.success("🎉 合計 " + str(total_count) + " 件のデータをDBに保存しました！")
+                    st.session_state.chat_history.append({
+                        "role": "assistant",
+                        "content": response,
+                        "links": display_links,
+                    })
