@@ -443,6 +443,38 @@ def index_channel(sel, token):
 # ======================
 # UI
 # ======================
+st.markdown("""
+<style>
+/* ブランキュのアバターを大きく */
+[data-testid="stChatMessageAvatarAssistant"] {
+    width: 80px !important;
+    height: 80px !important;
+    min-width: 80px !important;
+    border-radius: 50% !important;
+    overflow: hidden !important;
+}
+[data-testid="stChatMessageAvatarAssistant"] img {
+    width: 80px !important;
+    height: 80px !important;
+    object-fit: contain !important;
+}
+/* アシスタントの吹き出し */
+[data-testid="stChatMessageContent"] {
+    background: #f3e8ff;
+    border-radius: 20px;
+    border-top-left-radius: 4px;
+    padding: 16px 20px !important;
+    box-shadow: 0 2px 6px rgba(0,0,0,0.08);
+}
+/* ユーザーの吹き出し */
+[data-testid="stChatMessageAvatarUser"] ~ [data-testid="stChatMessageContent"] {
+    background: #e8f4ff;
+    border-radius: 20px;
+    border-top-right-radius: 4px;
+}
+</style>
+""", unsafe_allow_html=True)
+
 st.title("ブランキュ AI検索アシスタント")
 
 app = get_msal_app()
