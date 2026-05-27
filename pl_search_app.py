@@ -43,7 +43,7 @@ for key, val in defaults.items():
     if key not in st.session_state:
         st.session_state[key] = val
 
-_avatar_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "ブランキュ.png")
+_avatar_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "wakatakekun.png")
 BRANCHU_AVATAR = Image.open(_avatar_path) if os.path.exists(_avatar_path) else "🐾"
 
 SYSTEM_PROMPT = (
