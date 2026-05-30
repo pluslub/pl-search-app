@@ -172,13 +172,11 @@ def get_embed_model_name():
             methods = m.get("supportedGenerationMethods", [])
             if "embedContent" in methods:
                 return m["name"].replace("models/", "")
-    return None
+    return "text-embedding-004"
 
 def get_embedding(text):
     import time
     model_name = get_embed_model_name()
-    if not model_name:
-        raise Exception("利用可能なembeddingモデルが見つかりません")
     url = (
         "https://generativelanguage.googleapis.com/v1beta/models/"
         + model_name + ":embedContent"
@@ -234,9 +232,6 @@ def save_document(source_type, source_id, title, content, author, recorded_at, u
 def search_documents(query_text, channel_names=None):
     try:
         model_name = get_embed_model_name()
-        if not model_name:
-            st.warning("利用可能なembeddingモデルが見つかりませんでした。")
-            return []
         embed_url = (
             "https://generativelanguage.googleapis.com/v1beta/models/"
             + model_name + ":embedContent"
