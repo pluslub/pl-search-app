@@ -177,25 +177,19 @@ def get_embed_model_name():
 def get_embedding(text):
     import time
     model_name = get_embed_model_name()
-    url = (
-        "https://generativelanguage.googleapis.com/v1beta/models/"
-        + model_name + ":embedContent"
-    )
-    body = {
-        "model": "models/" + model_name,
-        "content": {"parts": [{"text": text[:2000]}]},
-        "taskType": "RETRIEVAL_DOCUMENT"
-    }
     for attempt in range(5):
-        res = requests.post(url, json=body, params={"key": GEMINI_API_KEY})
-        if res.status_code == 200:
-            return res.json()["embedding"]["values"]
-        if res.status_code == 429:
-            time.sleep(2 ** attempt)
-            continue
-        res.raise_for_status()
-    res.raise_for_status()
-    return []
+        try:
+            result = genai.embed_content(
+                model="models/" + model_name,
+                content=text[:2000],
+                task_type="retrieval_document"
+            )
+            return result["embedding"]
+        except Exception as e:
+            if "429" in str(e) or "quota" in str(e).lower():
+                time.sleep(2 ** attempt)
+                continue
+            raise
 
 
 # --- Supabaseにドキュメントを保存 ---
@@ -232,18 +226,12 @@ def save_document(source_type, source_id, title, content, author, recorded_at, u
 def search_documents(query_text, channel_names=None):
     try:
         model_name = get_embed_model_name()
-        embed_url = (
-            "https://generativelanguage.googleapis.com/v1beta/models/"
-            + model_name + ":embedContent"
+        embed_result = genai.embed_content(
+            model="models/" + model_name,
+            content=query_text,
+            task_type="retrieval_query"
         )
-        embed_body = {
-            "model": "models/" + model_name,
-            "content": {"parts": [{"text": query_text}]},
-            "taskType": "RETRIEVAL_QUERY"
-        }
-        embed_res = requests.post(embed_url, json=embed_body, params={"key": GEMINI_API_KEY})
-        embed_res.raise_for_status()
-        query_embedding = embed_res.json()["embedding"]["values"]
+        query_embedding = embed_result["embedding"]
         result = supabase.rpc("match_documents", {
             "query_embedding": query_embedding,
             "match_threshold": 0.3,
