@@ -549,6 +549,32 @@ if st.session_state.ms_token:
         ]
 
         st.divider()
+        st.header("🔍 Embedding診断")
+        if st.button("Embeddingエンドポイントを診断"):
+            for ver, mdl in EMBED_CANDIDATES:
+                url = (
+                    "https://generativelanguage.googleapis.com/"
+                    + ver + "/models/" + mdl + ":embedContent"
+                )
+                res = requests.post(
+                    url,
+                    json={"content": {"parts": [{"text": "test"}]}},
+                    params={"key": GEMINI_API_KEY}
+                )
+                st.write(ver + "/" + mdl + " → " + str(res.status_code) + ": " + res.text[:200])
+            st.subheader("利用可能なモデル一覧")
+            for ver in ["v1", "v1beta"]:
+                r = requests.get(
+                    "https://generativelanguage.googleapis.com/" + ver + "/models",
+                    params={"key": GEMINI_API_KEY}
+                )
+                if r.status_code == 200:
+                    names = [m["name"] for m in r.json().get("models", [])
+                             if "embed" in m["name"].lower() or
+                             any("embed" in x.lower() for x in m.get("supportedGenerationMethods", []))]
+                    st.write(ver + ": " + str(names))
+
+        st.divider()
         st.header("🔄 インデックス更新")
         st.caption("新しい記録が増えたときに実行してね")
         index_indices = st.multiselect(
